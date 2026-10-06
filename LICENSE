@@ -1,0 +1,10 @@
+shinymanager (portage Python) — Copyright (C) 2026
+
+Ce programme est un logiciel libre : vous pouvez le redistribuer et/ou le
+modifier selon les termes de la GNU General Public License version 3, telle que
+publiee par la Free Software Foundation.
+
+Oeuvre derivee du package R shinymanager (datastorm-open), sous GPL-3.
+
+Le texte integral de la GPL-3 doit etre inclus ici avant toute publication
+(https://www.gnu.org/licenses/gpl-3.0.txt).
