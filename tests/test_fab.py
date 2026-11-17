@@ -1,4 +1,4 @@
-"""Phase 8 — tests du bouton flottant et du heartbeat de timeout (approche DU1, structure)."""
+"""Tests du bouton flottant et du heartbeat de timeout (structure)."""
 
 from shinymanager.fab import _ACTIVITY_EVENTS, fab_button, timeout_script
 

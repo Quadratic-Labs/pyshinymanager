@@ -1,8 +1,8 @@
 """Module Shiny de changement de mot de passe (source R/module-pwd.R).
 
-Module 9 du plan. Fidelite IDIOMATIQUE (py-shiny), approche de validation DU1 : l'orchestration
+Fidelite IDIOMATIQUE (py-shiny), approche de validation : l'orchestration
 `process_pwd_change` (cascade de validations + update) est testee sans navigateur ; `pwd_ui`
-retourne une structure verifiable ; `pwd_server` est un cablage reactif mince (smoke au module 11).
+retourne une structure verifiable ; `pwd_server` est un cablage reactif mince (smoke via l'app).
 
 Cascade reproduite du source (module-pwd.R L142-201), dans l'ordre :
   1. les deux mots de passe doivent etre identiques ;
@@ -18,13 +18,14 @@ from dataclasses import dataclass
 from typing import Any
 
 from faicons import icon_svg
-from shiny import Inputs, Outputs, Session, module, reactive, render, ui
+from shiny import Inputs, Outputs, Session, module, reactive, render, req, ui
 from shiny.module import current_namespace
 
 from shinymanager.i18n import use_language
 from shinymanager.passwords import validate_pwd as _default_validate_pwd
 from shinymanager.pwd_lifecycle import check_new_pwd
 from shinymanager.pwd_lifecycle import update_pwd as _default_update_pwd
+from shinymanager.tokens import _tok
 
 
 @dataclass
@@ -140,10 +141,13 @@ def pwd_server(
     update_pwd: Callable[[str, str], dict] | None = None,
     validate_pwd: Callable[[str], bool] | None = None,
     language: str = "en",
+    token: str | None = None,
 ) -> reactive.Value:
     """Serveur du module de changement de mot de passe (equivalent pwd_server R).
 
     `update_pwd` reproduit le parametre injectable du source (defaut : update du package).
+    Avec `token` (equivalent de `use_token`), le changement exige un token encore actif : ni
+    revoque ni expire (comme le source).
 
     Returns:
         Une reactive.value exposant le resultat du changement a l'appelant.
@@ -156,6 +160,8 @@ def pwd_server(
     @reactive.effect  # pragma: no cover
     @reactive.event(input.update_pwd)
     def _on_update() -> None:
+        if token is not None:
+            req(_tok.is_active(token))
         outcome = process_pwd_change(
             user["user"], input.pwd_one(), input.pwd_two(), validate_pwd, update_pwd
         )

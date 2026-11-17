@@ -1,20 +1,21 @@
 """Module Shiny de login (source R/module-auth.R).
 
-Module 8 du plan. Deux surfaces coherentes :
+Deux surfaces coherentes :
   - `_evaluate_login` (decision pure) + `process_login` (orchestration) : testables sans
     navigateur ; REUTILISES par `secure_app` (flux cookie httponly) ET par `auth_server` ci-dessous.
   - `auth_ui` / `auth_server` : le module de login REACTIF standalone, reconstruit fidelement
-    contre `docs/migration/comprehension/surface/auth-screens.md` (panneau centre, i18n, selecteur
+    sur le source (panneau centre, i18n, selecteur
     de langue, params du source). Utilisable hors du flux cookie : `auth_server` expose l'etat
     d'authentification (contrat `authentication` du source) ; l'integrateur gere le token.
 
 `_evaluate_login` reproduit exactement l'arbre de decision de l'observeEvent du source
-(module-auth.R L249-322). Le cablage reactif est `# pragma: no cover` (approche DU1).
+(module-auth.R L249-322). Le cablage reactif est `# pragma: no cover`.
 """
 
 from __future__ import annotations
 
-import math
+import asyncio
+import time
 import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -28,7 +29,14 @@ from shinymanager import settings
 from shinymanager.i18n import Language, use_language
 from shinymanager.logs import save_logs_failed
 from shinymanager.pwd_lifecycle import check_locked_account, is_temp_pwd_expired
-from shinymanager.reset_password import reset_pwd_user_email, save_reset_logs
+from shinymanager.reset_password import (
+    RESET_BTN_DELAY,
+    RESET_MESSAGES,
+    handle_reset_request,
+    reset_link_unavailable_reason,
+    reset_result_code,
+    warn_reset_link_hidden,
+)
 from shinymanager.tokens import _tok
 
 #: Langues enregistrees (code -> nom d'affichage), depuis le module i18n (extrait du source).
@@ -65,7 +73,7 @@ def _evaluate_login(
     """Traduit (resultat check_credentials, verrouillage, expiration du mdp temporaire) en decision.
 
     Reproduit l'arbre du source : succes non verrouille et mdp temporaire valide -> authentifie ;
-    succes verrouille -> compte verrouille ; succes avec mdp temporaire expire (1.1.1.1) ->
+    succes verrouille -> compte verrouille ; succes avec mdp temporaire expire ->
     message dedie ; sinon message selon user inconnu / expire / non autorise / mauvais mdp.
     """
     if res_auth.get("result") and not locked and not temp_pwd_expired:
@@ -99,7 +107,8 @@ def process_login(
     """
     res_auth = check_credentials(user, password)
     limit = settings.get_pwd_failure_limit()
-    locked = check_locked_account(user, limit) if math.isfinite(limit) else False
+    finite_limit = settings.is_finite_limit(limit)
+    locked = check_locked_account(user, float(limit)) if finite_limit else False
     # mot de passe temporaire envoye par le reset en libre-service et plus valide ?
     temp_pwd_expired = bool(res_auth.get("result")) and is_temp_pwd_expired(user)
 
@@ -111,6 +120,15 @@ def process_login(
 
     if outcome.log_status:
         save_logs_failed(user, outcome.log_status)
+    if outcome.log_status == "Wrong pwd" and finite_limit:
+        # Comme en R : la tentative qui atteint la limite verrouille tout de suite, et un compte
+        # verrouille affiche "verrouille" meme avec un mauvais mot de passe.
+        if not locked:
+            locked = check_locked_account(user, float(limit))
+            if locked:
+                save_logs_failed(user, "Account locked")
+        if locked:
+            outcome.message_key = "Your account is locked"
     return outcome, None, None
 
 
@@ -206,7 +224,7 @@ def auth_ui(
             ui.tags.br(),
             id=f"{ns}container-btn-ok",
         ),
-        # 1.1.1.1 : lien de reset en libre-service + ancre du panneau (module-auth.R:134-143).
+        # Lien de reset en libre-service + ancre du panneau (module-auth.R:134-143).
         ui.tags.div(
             ui.input_action_link("show_reset_pwd", lan.get("Forgot password?")),
             style="text-align: center; margin-top: -10px; margin-bottom: 10px;",
@@ -263,13 +281,22 @@ def auth_server(
     message: reactive.Value = reactive.value(None)
     current_lan: reactive.Value = reactive.value(use_language(language))
 
+    # auth_ui affiche le lien des que l'option est posee : le retirer quand le reset ne peut pas
+    # marcher (sans `send_mail`, sans base, sans colonne email), avec un warning (comme le source).
+    # `check_credentials` a deja ete cree par l'appelant, il a donc pose le backend.
+    if settings.reset_password_enabled():  # pragma: no cover
+        reason = reset_link_unavailable_reason()
+        if reason is not None:
+            warn_reset_link_hidden(reason)
+            ui.remove_ui(selector=f"#{session.ns('show_reset_pwd')}")
+
     @reactive.effect  # pragma: no cover
     @reactive.event(input.language, ignore_init=True)
     def _on_language() -> None:
         lang = input.language()
         lan = use_language(lang)
         current_lan.set(lan)
-        # 1.1.1.1 : retire les messages transitoires (pas de texte dans l'ancienne langue)
+        # Retire les messages transitoires (pas de texte dans l'ancienne langue)
         message.set(None)
         ui.remove_ui(selector=f"#{session.ns('reset_pwd_msg')}")
         ui.update_text("user_id", label=lan.get("Username:"))
@@ -303,7 +330,7 @@ def auth_server(
         else:
             message.set(outcome.message_key)
 
-    # --- Reset en libre-service (1.1.1.1, module-auth.R:373-419) ---------------------------
+    # --- Reset en libre-service (module-auth.R:373-419) ------------------------------------
     @reactive.effect  # pragma: no cover
     @reactive.event(input.show_reset_pwd, ignore_init=True)
     def _on_show_reset_pwd() -> None:
@@ -325,34 +352,59 @@ def auth_server(
             selector=f"#{session.ns('reset_pwd_panel')}",
         )
 
+    def _reset_msg(code: str, *extra: Any) -> ui.Tag:
+        key, alert = RESET_MESSAGES[code]
+        return ui.tags.div(
+            icon_svg("circle-info" if alert == "info" else "triangle-exclamation"),
+            " " + current_lan().get(key),
+            *extra,
+            id=session.ns("reset_pwd_msg"),
+            class_=f"alert alert-{alert}",
+        )
+
+    def _reset_btn_js(disabled: bool, delay_ms: int = 0) -> ui.Tag:
+        js = f"$('#{session.ns('do_reset_pwd')}').prop('disabled', {str(disabled).lower()});"
+        return ui.tags.script(f"setTimeout(function(){{{js}}}, {delay_ms});" if delay_ms else js)
+
     @reactive.effect  # pragma: no cover
     @reactive.event(input.do_reset_pwd, ignore_init=True)
-    def _on_do_reset_pwd() -> None:
-        ui.remove_ui(selector=f"#{session.ns('reset_pwd_msg')}")
-        # Le resultat est journalise cote admin mais jamais montre : le meme message generique
-        # est toujours affiche, pour ne pas reveler quels comptes / emails existent.
+    async def _on_do_reset_pwd() -> None:
+        # le formulaire n'est affiche que si l'option est active, mais ses inputs peuvent etre
+        # envoyes quand meme
+        if not settings.reset_password_enabled():
+            return
+        result_sel = f"#{session.ns('reset_pwd_result')}"
+        msg_sel = f"#{session.ns('reset_pwd_msg')}"
+        user = input.reset_user()
         email = None if settings.reset_password_username_only() else input.reset_email()
-        res = reset_pwd_user_email(input.reset_user(), email)
-        save_reset_logs(input.reset_user(), res["reason"])
+        ui.remove_ui(selector=msg_sel, immediate=True)
+        # champ vide : rien a verifier ni a envoyer (ne revele rien sur les comptes)
+        if not (user or "").strip() or (email is not None and not email.strip()):
+            ui.insert_ui(_reset_msg("empty"), selector=result_sel, immediate=True)
+            return
+        # Message generique AVANT l'envoi (qui peut prendre quelques secondes), bouton desactive
+        # pour eviter une seconde demande. L'envoi tourne dans un thread : la boucle d'evenements
+        # (les autres sessions) n'est pas bloquee.
+        start = time.monotonic()
+        ui.insert_ui(_reset_msg("sent", _reset_btn_js(True)), selector=result_sel, immediate=True)
+        res = await asyncio.to_thread(handle_reset_request, user, email)
+        code = reset_result_code(res["reason"])
+        ui.remove_ui(selector=msg_sel, immediate=True)
+        ui.insert_ui(_reset_msg(code), selector=result_sel, immediate=True)
+        # bouton reactive apres le meme delai minimal quelle que soit l'issue : le temps de
+        # reponse ne revele pas quels comptes existent
+        delay = max(0.0, RESET_BTN_DELAY - (time.monotonic() - start))
         ui.insert_ui(
-            ui.tags.div(
-                icon_svg("circle-info"),
-                " "
-                + current_lan().get(
-                    "If the account exists and an email address is associated with it, an "
-                    "email containing a temporary password has been sent."
-                ),
-                id=session.ns("reset_pwd_msg"),
-                class_="alert alert-info",
-            ),
-            selector=f"#{session.ns('reset_pwd_result')}",
+            ui.tags.div(_reset_btn_js(False, int(delay * 1000))),
+            selector=result_sel,
+            immediate=True,
         )
 
     @render.ui  # pragma: no cover
     def update_shinymanager_language() -> Any:
         # Ancre du source (module-auth.R:212-214) : injecte l'i18n client-wide au changement de
         # langue. Le relabel cible (champs/label) est fait ci-dessus ; l'i18n client-wide global
-        # (traduction de data-i18n hors module) n'est pas portee -> ecart suivi au registre.
+        # (traduction de data-i18n hors module) n'est pas portee -> ecart connu.
         return None
 
     @render.ui  # pragma: no cover

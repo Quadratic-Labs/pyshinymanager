@@ -1,15 +1,15 @@
 """Primitives de mots de passe : generation, validation, hachage scrypt (source R/utils.R).
 
-Module 3 du plan (reduit aux primitives pures ; la logique de cycle de vie dependante du backend
-- check_new_pwd, update_pwd, verrouillage - est reportee a un module post-persistance, cf. gate).
+Reduit aux primitives pures ; la logique de cycle de vie dependante du backend
+- check_new_pwd, update_pwd, verrouillage - est dans le module pwd_lifecycle.
 
-Compatibilite scrypt (D4) : le package R `scrypt` produit le format standard de C. Percival
+Compatibilite scrypt : le package R `scrypt` produit le format standard de C. Percival
 (magic "scrypt", logN/r/p, salt, checksum, HMAC ; 96 octets base64). Ce module lit et ecrit ce
 MEME format via la stdlib (hashlib.scrypt + hmac), sans dependance tierce : un hash produit par
-R est verifiable ici, et reciproquement. Le repli "re-hash au premier login" (D4) n'est donc pas
+R est verifiable ici, et reciproquement. Le repli "re-hash au premier login" n'est donc pas
 necessaire.
 
-Fidelite PORTAGE_1_1 pour generate_pwd et validate_pwd. Quirk reproduit (ZF-5) : generate_pwd ne
+Port fidele pour generate_pwd et validate_pwd. Quirk reproduit : generate_pwd ne
 garantit pas de satisfaire validate_pwd (mot de passe temporaire, must_change).
 """
 

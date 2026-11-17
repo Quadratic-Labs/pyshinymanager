@@ -1,24 +1,25 @@
 """Fabrique de verification des credentials (source R/check_credentials.R).
 
-Module 6 du plan. Fidelite PORTAGE_1_1 : `check_credentials(db)` retourne une closure
+Port fidele : `check_credentials(db)` retourne une closure
 `(user, password) -> dict` dont le comportement depend du type de `db` :
   - liste de dicts / dict de colonnes -> verification en memoire ;
   - chemin ``.sqlite`` -> lecture du backend SQLite (module db) ;
   - chemin ``.yml``/``.yaml`` ou dict de config -> backend SQL (module db_sql, config declarative
-    DS1-A ; `!expr` non evalue, D1).
+    uniquement, `!expr` non evalue).
 La fabrique renseigne aussi `_tok` (backend actif) pour les modules pwd_lifecycle / logs.
 
 Contrat de retour reproduit a l'identique : ``result``, ``expired``, ``authorized``, ``user_info``.
-Ecart assume (decision Jeremy 2026-07-16) : les backends SQLite et SQL RELISENT la base a chaque
+Ecart volontaire avec le package R : les backends SQLite et SQL RELISENT la base a chaque
 appel. Le source lit une fois a la creation de la closure, mais la recree une fois par session
-(closure dans la fonction server R) ; notre architecture ASGI (DA1) ne la recree pas -> une lecture
-unique casserait le changement de mot de passe (l'ancien resterait valide). Voir migration.md.
+(closure dans la fonction server R) ; notre architecture ASGI ne la recree pas -> une lecture
+unique casserait le changement de mot de passe (l'ancien resterait valide).
 Quirk du source reproduit : un utilisateur avec application non autorisee recoit result=False ET
 authorized=False.
 """
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from datetime import date, timedelta
 from typing import Any
@@ -34,6 +35,8 @@ _TRUE_STRINGS = {"T", "TRUE", "True", "true"}
 def _is_true(value: Any) -> bool:
     if isinstance(value, bool):
         return value
+    if isinstance(value, (int, float)):
+        return value == value and value != 0  # as.logical(1) = TRUE ; NaN -> NA
     return isinstance(value, str) and value in _TRUE_STRINGS
 
 
@@ -74,7 +77,7 @@ def check_credentials_df(
     good_password = verify_pwd(str(stored), password) if is_hashed else (stored == password)
 
     if "expire" in columns or "start" in columns:
-        # DEVIATION assumee (Jeremy 2026-07-16) vs le source. Le source, quand start/expire est
+        # DEVIATION assumee vs le source. Le source, quand start/expire est
         # vide, fixe le defaut (today-1 / today+1) ET le REINJECTE dans user_info
         # (check_credentials.R:131-135) : consequence -> l'app affiche "expire demain" pour un
         # compte SANS expiration, alors que l'admin affiche vide. On calcule le defaut LOCALEMENT
@@ -111,12 +114,18 @@ def check_credentials(db: Any, passphrase: str | None = None) -> Callable[[str, 
     Args:
         db: liste de dicts / dict de colonnes, chemin ``.sqlite``, chemin ``.yml`` ou dict de
             config SQL declaratif.
-        passphrase: ignore (pas de chiffrement, D7) ; accepte pour compat d'appel.
+        passphrase: passphrase d'une base SQLite chiffree (format du package R).
 
     Raises:
         ValueError: si `db` n'est pas d'un type reconnu.
+        FileNotFoundError: si le fichier ``.sqlite`` / ``.yml`` n'existe pas (comme en R : sinon
+            sqlite3 cree un fichier vide et chaque login echoue sur "no such table").
     """
-    if isinstance(db, str) and db.endswith(".sqlite"):
+    ext = os.path.splitext(db)[1].lower() if isinstance(db, str) else ""
+    if ext in (".sqlite", ".yml", ".yaml") and not os.path.exists(db):
+        # souvent un chemin relatif lance depuis un autre repertoire de travail
+        raise FileNotFoundError(f"File not found: '{db}' (working directory: {os.getcwd()})")
+    if ext == ".sqlite":
         _tok.set_sqlite_path(db)
         _tok.set_passphrase(passphrase)
         _tok.set_sql_config_db(None)
@@ -124,16 +133,16 @@ def check_credentials(db: Any, passphrase: str | None = None) -> Callable[[str, 
         # RELIT A CHAQUE APPEL (comme le backend SQL ci-dessous). Le source R lit la base UNE
         # fois a la creation de la closure, mais il appelle `check_credentials(...)` DANS la
         # fonction server, executee une fois PAR SESSION -> chaque nouvelle connexion relit.
-        # Notre architecture (login par route ASGI, DA1) cree la closure une fois par PROCESSUS ;
+        # Notre architecture (login par route ASGI) cree la closure une fois par PROCESSUS ;
         # une lecture unique rendrait invisible tout changement de mot de passe jusqu'au
         # redemarrage (l'ancien mdp continuerait a marcher). On relit donc a chaque tentative.
         def _sqlite_check(user: str, password: str) -> dict[str, Any]:
-            rows = db_module.read_db(db, "credentials")
+            rows = db_module.read_db(db, "credentials", passphrase)
             return check_credentials_df(user, password, rows)
 
         return _sqlite_check
 
-    if (isinstance(db, str) and (db.endswith(".yml") or db.endswith(".yaml"))) or _is_sql_conf(db):
+    if ext in (".yml", ".yaml") or _is_sql_conf(db):
         conf = db_sql.load_config(db)  # chargement YAML unique (plus de duplication)
         _tok.set_sqlite_path(None)
         _tok.set_sql_config_db(conf)

@@ -1,4 +1,4 @@
-"""Phase 8 — tests unitaires de la journalisation (sans dependance R).
+"""Tests unitaires de la journalisation (sans dependance R).
 
 Couvre le backend SQL (cross-backend), le cycle de verrouillage complet (increment ->
 check_locked_account -> reset), et la garde write_logs.
@@ -31,7 +31,7 @@ def sql_conf(tmp_path):
 
 def test_read_logs_dedup_is_faithful_to_source(tmp_path):
     # Source (modules-logs.R:138-143) : dedup UNIQUEMENT si tokens dupliques, cle (user, token,
-    # jour). D5 corrige : plus de dedup toutes-colonnes inconditionnelle.
+    # jour). Corrige : plus de dedup toutes-colonnes inconditionnelle.
     from shinymanager.db import create_db, write_db
 
     path = str(tmp_path / "c.sqlite")
@@ -125,7 +125,7 @@ def test_sql_failed_log_written_and_success_logged(sql_conf):
 
 
 def test_write_logs_disabled_skips_all_log_writes_but_still_increments(tmp_path):
-    # ECART ASSUME (gate module 7) : write_logs=False bloque l'ecriture du log dans les DEUX
+    # Ecart volontaire : write_logs=False bloque l'ecriture du log dans les DEUX
     # backends (SQLite aligne sur SQL), MAIS l'increment n_wrong_pwd a toujours lieu.
     from shinymanager.db import create_db, read_db
 

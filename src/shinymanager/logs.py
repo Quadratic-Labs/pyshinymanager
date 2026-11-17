@@ -1,16 +1,17 @@
 """Journalisation des connexions (source R/utils.R : save_logs / save_logs_failed / logout_logs).
 
-Module 7 du plan (partie logique). Orchestre les backends SQLite (module db, lecture-
+Partie logique. Orchestre les backends SQLite (module db, lecture-
 modification-ecriture) et SQL (module db_sql, append + update) via `_tok` et les options
 (module settings). La vue graphique des logs (modules-logs.R, billboarder) releve de la couche
-UI (approche legere DU1) et est traitee avec l'admin.
+UI (approche legere) et est traitee avec l'admin.
 
 Quirks reproduits (source fait foi) :
   - `save_logs` (succes) et `logout_logs` sont gardes par l'option write_logs ; `save_logs_failed`
-    garde aussi l'insertion du log par write_logs dans LES DEUX backends (ECART ASSUME, gate
-    module 7 : alignement de SQLite sur SQL vs l'asymetrie ZF-1 du source), l'increment
+    garde aussi l'insertion du log par write_logs dans LES DEUX backends (ecart volontaire :
+    alignement de SQLite sur SQL vs l'asymetrie du source), l'increment
     n_wrong_pwd ayant TOUJOURS lieu (le verrouillage doit marcher meme sans logs) ;
-  - `save_logs` est idempotent par (user, jour, token) et remet n_wrong_pwd a 0 ;
+  - `save_logs` est idempotent par (user, jour, token) et remet les compteurs n_wrong_pwd et
+    n_user_reset a 0 (comme le source : aussi quand write_logs est desactive) ;
   - `save_logs_failed(status="Wrong pwd")` incremente n_wrong_pwd (verrouillage progressif).
 Les erreurs de base sont degradees en avertissement (comme le try(silent=TRUE) du source).
 """
@@ -22,6 +23,7 @@ from datetime import datetime
 from typing import Any
 
 from shinymanager import db, db_sql, settings
+from shinymanager.pwd_lifecycle import reset_login_counters
 from shinymanager.tokens import _tok
 
 
@@ -43,30 +45,26 @@ def _warn(exc: Exception) -> None:
     warnings.warn(f"shinymanager: unable to save logs | error: {exc}", stacklevel=2)
 
 
-def _reset_wrong_pwd(kind: str, handle: Any, user: str) -> None:
-    if kind == "sqlite":
-        pwd = db.read_db(handle, "pwd_mngt")
-        for row in pwd:
-            if row.get("user") == user:
-                row["n_wrong_pwd"] = 0
-        db.write_db(handle, pwd, "pwd_mngt")
-    else:
-        db_sql.update_sql_db(handle, "pwd_mngt", {"n_wrong_pwd": 0}, "user", user)
-
-
 def save_logs(token: str) -> None:
-    """Enregistre une connexion reussie (idempotente par user/jour/token), remet n_wrong_pwd a 0."""
-    if not settings.get_option("write_logs"):
-        return
+    """Enregistre une connexion reussie (idempotente par user/jour/token), compteurs remis a 0."""
     kind, handle = _active()
     if kind is None:
         return
     user = _tok.get_user(token)
+    if not settings.get_option("write_logs"):
+        # pas de logs, mais les compteurs doivent quand meme repartir de 0 (comme le source)
+        try:
+            reset_login_counters(user)
+        except Exception as exc:
+            warnings.warn(
+                f"shinymanager: unable to reset the user counters | error: {exc}", stacklevel=2
+            )
+        return
     now = _now()
     app = settings.get_option("application")
     try:
         if kind == "sqlite":
-            logs = db.read_db(handle, "logs")
+            logs = db.read_db(handle, "logs", _tok.get_passphrase())
             already = any(
                 r.get("user") == user
                 and str(r.get("server_connected") or "")[:10] == now[:10]
@@ -84,8 +82,8 @@ def save_logs(token: str) -> None:
                         "status": "Success",
                     }
                 )
-                db.write_db(handle, logs, "logs")
-                _reset_wrong_pwd(kind, handle, user)
+                db.write_db(handle, logs, "logs", _tok.get_passphrase())
+                reset_login_counters(user)
         else:
             logs = db_sql.read_table_sql(handle, "logs")
             if not any(r.get("token") == token for r in logs):
@@ -103,7 +101,7 @@ def save_logs(token: str) -> None:
                     ],
                     "logs",
                 )
-                _reset_wrong_pwd(kind, handle, user)
+                reset_login_counters(user)
     except Exception as exc:  # degrade en warning comme le source
         _warn(exc)
 
@@ -111,8 +109,8 @@ def save_logs(token: str) -> None:
 def save_logs_failed(user: str, status: str = "Failed") -> None:
     """Enregistre un echec de connexion ; incremente n_wrong_pwd si status == 'Wrong pwd'.
 
-    L'insertion du log est gardee par write_logs dans les deux backends (ecart assume vs ZF-1,
-    gate module 7) ; l'increment n_wrong_pwd a TOUJOURS lieu (verrouillage sans logs possible).
+    L'insertion du log est gardee par write_logs dans les deux backends (ecart assume vs le
+    source) ; l'increment n_wrong_pwd a TOUJOURS lieu (verrouillage sans logs possible).
     """
     kind, handle = _active()
     if kind is None:
@@ -131,9 +129,9 @@ def save_logs_failed(user: str, status: str = "Failed") -> None:
     try:
         if kind == "sqlite":
             if write_enabled:
-                logs = db.read_db(handle, "logs")
+                logs = db.read_db(handle, "logs", _tok.get_passphrase())
                 logs.append(row)
-                db.write_db(handle, logs, "logs")
+                db.write_db(handle, logs, "logs", _tok.get_passphrase())
         elif write_enabled:
             db_sql.write_sql_db(handle, [row], "logs")
         if status == "Wrong pwd":
@@ -144,11 +142,11 @@ def save_logs_failed(user: str, status: str = "Failed") -> None:
 
 def _increment_wrong_pwd(kind: str, handle: Any, user: str) -> None:
     if kind == "sqlite":
-        pwd = db.read_db(handle, "pwd_mngt")
+        pwd = db.read_db(handle, "pwd_mngt", _tok.get_passphrase())
         for row in pwd:
             if row.get("user") == user:
                 row["n_wrong_pwd"] = int(row.get("n_wrong_pwd") or 0) + 1
-        db.write_db(handle, pwd, "pwd_mngt")
+        db.write_db(handle, pwd, "pwd_mngt", _tok.get_passphrase())
     else:
         pwd = db_sql.read_table_sql(handle, "pwd_mngt")
         current = next((r for r in pwd if r.get("user") == user), None)
@@ -173,7 +171,11 @@ def read_logs(
     kind, handle = _active()
     if kind is None:
         return []
-    rows = db.read_db(handle, "logs") if kind == "sqlite" else db_sql.read_table_sql(handle, "logs")
+    rows = (
+        db.read_db(handle, "logs", _tok.get_passphrase())
+        if kind == "sqlite"
+        else db_sql.read_table_sql(handle, "logs")
+    )
     tokens = [r.get("token") for r in rows]
     if len(tokens) != len(set(tokens)):  # any(duplicated(token)) cote R (NA compris)
         seen_keys: set[tuple] = set()
@@ -206,11 +208,11 @@ def logout_logs(token: str) -> None:
     now = _now()
     try:
         if kind == "sqlite":
-            logs = db.read_db(handle, "logs")
+            logs = db.read_db(handle, "logs", _tok.get_passphrase())
             for row in logs:
                 if row.get("token") == token:
                     row["logout"] = now
-            db.write_db(handle, logs, "logs")
+            db.write_db(handle, logs, "logs", _tok.get_passphrase())
         else:
             db_sql.update_sql_db(handle, "logs", {"logout": now}, "token", token)
     except Exception as exc:

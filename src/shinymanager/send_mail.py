@@ -1,4 +1,4 @@
-"""Envoi d'un email par SMTP (source R/send-mail.R, 1.1.1.1).
+"""Envoi d'un email par SMTP (source R/send-mail.R).
 
 Helper optionnel, equivalent de `send_smtp_mail()` du source (base sur le package R `emayili`,
 en Suggests). Ici : bibliotheque standard (`smtplib` + `email.message`), donc aucune dependance.

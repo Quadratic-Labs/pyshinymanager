@@ -1,5 +1,5 @@
 #!/usr/bin/env Rscript
-# Oracle differentiel du reset de mot de passe en libre-service (1.1.1.1, backend SQLite).
+# Oracle differentiel du reset de mot de passe en libre-service (backend SQLite).
 # Joue une sequence deterministe inspiree de tests/testthat/test-reset-password.R et renvoie
 # les valeurs observables (codes reason, mail envoye ou non, mot de passe effectif, must_change,
 # expiration, statuts de logs). Le mot de passe temporaire etant aleatoire, on compare des
@@ -15,7 +15,7 @@ out_file <- args[[1]]
 
 this_dir <- dirname(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)))
 if (length(this_dir) == 0 || !nzchar(this_dir)) this_dir <- "."
-src <- normalizePath(file.path(this_dir, "..", "..", "..", "source", Sys.getenv("SM_SOURCE", "shinymanager-1.1.1.1")), mustWork = TRUE)
+src <- normalizePath(Sys.getenv("SM_SOURCE_PATH", file.path(this_dir, "..", "..", "..", "source", Sys.getenv("SM_SOURCE", "shinymanager"))), mustWork = TRUE)
 suppressWarnings(suppressMessages(pkgload::load_all(src, quiet = TRUE, export_all = TRUE)))
 
 new_db <- function() {

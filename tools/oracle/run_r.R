@@ -5,7 +5,7 @@
 # Usage : Rscript run_r.R <cases.json> <out.json>
 #
 # Le clone est charge via pkgload::load_all() pour garantir que l'oracle valide la version
-# exacte que l'on migre (le systeme a shinymanager 1.0.410 installe, la source est 1.1.0).
+# exacte que l'on migre (et non une version installee du package).
 #
 # Format des cas (cases.json) : liste d'objets
 #   { "id": "cas-01", "fn": "generate_pwd", "args": { ... } }
@@ -24,7 +24,7 @@ out_file <- args[[2]]
 # Racine du clone source, relative a ce script : target/tools/oracle -> ../../../source/shinymanager
 this_dir <- dirname(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)))
 if (length(this_dir) == 0 || !nzchar(this_dir)) this_dir <- "."
-src <- normalizePath(file.path(this_dir, "..", "..", "..", "source", Sys.getenv("SM_SOURCE", "shinymanager-1.1.1.1")), mustWork = FALSE)
+src <- normalizePath(Sys.getenv("SM_SOURCE_PATH", file.path(this_dir, "..", "..", "..", "source", Sys.getenv("SM_SOURCE", "shinymanager"))), mustWork = FALSE)
 
 if (requireNamespace("pkgload", quietly = TRUE) && dir.exists(src)) {
   suppressWarnings(suppressMessages(pkgload::load_all(src, quiet = TRUE, export_all = TRUE)))

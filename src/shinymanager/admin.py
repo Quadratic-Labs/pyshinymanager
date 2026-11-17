@@ -1,10 +1,9 @@
 """Panneau d'administration (sources R/module-admin.R, R/module-edit_user.R, R/shiny-utils.R).
 
-Module 12 du plan. RECONSTRUCTION FIDELE contre la cible de surface
-`docs/migration/comprehension/surface/admin-panel.md` : memes ecrans, memes ids d'input, memes
+RECONSTRUCTION FIDELE de l'admin du package R : memes ecrans, memes ids d'input, memes
 libelles i18n, meme modele d'interaction (actions par ligne + modales), memes gardes.
 
-Ecarts assumes vs le source (registre de fidelite) :
+Ecarts assumes vs le source :
   - DT (DataTables) -> table HTML construite ici. Le modele d'interaction est preserve : UN SEUL
     input par action, valeur = utilisateur de la ligne cliquee (`Shiny.setInputValue` + priorite
     'event', comme `input_btns`). Le pagination/scroll de DT n'est pas porte.
@@ -21,8 +20,8 @@ Ecarts assumes vs le source (registre de fidelite) :
 
 Quirks du source REPRODUITS (comportement source fait foi) :
   - `change_selected_allusers` coche TOUT sans basculer, la ou `select_all_users` bascule ;
-  - cles i18n absentes du dictionnaire -> texte brut ("Maximum number of users : %s",
-    "Fail to update user", titre "Edit user" en dur pour l'edition multiple) ;
+  - titre "Edit user" en dur pour l'edition multiple (les cles "Maximum number of users: %s"
+    et "Failed to update user" sont alignees sur le dictionnaire, comme le package R) ;
   - la faute "succesfully" des messages de creation / reinitialisation est preservee.
 """
 
@@ -39,12 +38,18 @@ from pathlib import Path
 from typing import Any
 
 from faicons import icon_svg
-from shiny import Inputs, Outputs, Session, module, reactive, render, ui
+from shiny import Inputs, Outputs, Session, module, reactive, render, req, ui
 
 from shinymanager import db, db_sql, settings
 from shinymanager.i18n import Language, use_language
 from shinymanager.passwords import generate_pwd, hash_pwd
-from shinymanager.pwd_lifecycle import TEMP_PWD_EXPIRE, force_chg_pwd, set_temp_pwd_expire
+from shinymanager.pwd_lifecycle import (
+    N_USER_RESET,
+    TEMP_PWD_EXPIRE,
+    force_chg_pwd,
+    set_pwd_mngt_optional,
+    set_temp_pwd_expire,
+)
 from shinymanager.tokens import _tok
 
 _TRUE_STRINGS = {"T", "TRUE", "True", "true"}
@@ -56,6 +61,8 @@ _PWD_COLS = ("password", "is_hashed_password")
 def _is_true(value: Any) -> bool:
     if isinstance(value, bool):
         return value
+    if isinstance(value, (int, float)):
+        return value == value and value != 0  # as.logical(1) = TRUE ; NaN -> NA
     return isinstance(value, str) and value in _TRUE_STRINGS
 
 
@@ -71,7 +78,11 @@ def _active() -> tuple[str | None, Any]:
 
 
 def _read(kind: str, handle: Any, name: str) -> list[dict[str, Any]]:
-    return db.read_db(handle, name) if kind == "sqlite" else db_sql.read_table_sql(handle, name)
+    return (
+        db.read_db(handle, name, _tok.get_passphrase())
+        if kind == "sqlite"
+        else db_sql.read_table_sql(handle, name)
+    )
 
 
 def make_title(x: str) -> str:
@@ -122,16 +133,18 @@ def add_user(user_data: dict[str, Any], must_change: bool = True) -> None:
     row = {k: v for k, v in user_data.items() if k != "must_change"}
     row["is_hashed_password"] = "FALSE"
     if kind == "sqlite":
-        creds = db.read_db(handle, "credentials")
+        creds = db.read_db(handle, "credentials", _tok.get_passphrase())
         creds.append(row)
-        db.write_db(handle, creds, "credentials")
-        pwd = db.read_db(handle, "pwd_mngt")
+        db.write_db(handle, creds, "credentials", _tok.get_passphrase())
+        pwd = db.read_db(handle, "pwd_mngt", _tok.get_passphrase())
         new_pwd = _new_pwd_row(user_data["user"], must_change)
-        # colonne ajoutee par le reset en libre-service (1.1.1.1) : vide = pas d'expiration
+        # colonne ajoutee par le reset en libre-service : vide = pas d'expiration
         if any(TEMP_PWD_EXPIRE in r for r in pwd):
             new_pwd[TEMP_PWD_EXPIRE] = ""
+        if any(N_USER_RESET in r for r in pwd):
+            new_pwd[N_USER_RESET] = 0
         pwd.append(new_pwd)
-        db.write_db(handle, pwd, "pwd_mngt")
+        db.write_db(handle, pwd, "pwd_mngt", _tok.get_passphrase())
     else:
         db_sql.write_sql_db(handle, [row], "credentials")
         db_sql.write_sql_db(handle, [_new_pwd_row(user_data["user"], must_change)], "pwd_mngt")
@@ -162,22 +175,22 @@ def edit_user(user: str, changes: dict[str, Any]) -> None:
     if kind is None:
         return
     if kind == "sqlite":
-        creds = db.read_db(handle, "credentials")
+        creds = db.read_db(handle, "credentials", _tok.get_passphrase())
         for r in creds:
             if r.get("user") == user:
                 r.update(changes)
-        db.write_db(handle, creds, "credentials")
+        db.write_db(handle, creds, "credentials", _tok.get_passphrase())
     else:
         db_sql.update_sql_db(handle, "credentials", changes, "user", user)
     # Renommage : pwd_mngt suit l'utilisateur (module-admin.R:512-529).
     new_user = changes.get("user")
     if new_user and new_user != user:
         if kind == "sqlite":
-            pwd = db.read_db(handle, "pwd_mngt")
+            pwd = db.read_db(handle, "pwd_mngt", _tok.get_passphrase())
             for r in pwd:
                 if r.get("user") == user:
                     r["user"] = new_user
-            db.write_db(handle, pwd, "pwd_mngt")
+            db.write_db(handle, pwd, "pwd_mngt", _tok.get_passphrase())
         else:
             db_sql.update_sql_db(handle, "pwd_mngt", {"user": new_user}, "user", user)
 
@@ -193,10 +206,18 @@ def delete_users(users: list[str]) -> None:
     if kind is None:
         return
     if kind == "sqlite":
-        creds = [r for r in db.read_db(handle, "credentials") if r.get("user") not in users]
-        db.write_db(handle, creds, "credentials")
-        pwd = [r for r in db.read_db(handle, "pwd_mngt") if r.get("user") not in users]
-        db.write_db(handle, pwd, "pwd_mngt")
+        creds = [
+            r
+            for r in db.read_db(handle, "credentials", _tok.get_passphrase())
+            if r.get("user") not in users
+        ]
+        db.write_db(handle, creds, "credentials", _tok.get_passphrase())
+        pwd = [
+            r
+            for r in db.read_db(handle, "pwd_mngt", _tok.get_passphrase())
+            if r.get("user") not in users
+        ]
+        db.write_db(handle, pwd, "pwd_mngt", _tok.get_passphrase())
     else:
         for user in users:
             db_sql.delete_sql_db(handle, "credentials", "user", user)
@@ -220,17 +241,19 @@ def reset_password(user: str) -> str:
     new_pwd = generate_pwd()
     assert isinstance(new_pwd, str)
     if kind == "sqlite":
-        creds = db.read_db(handle, "credentials")
+        creds = db.read_db(handle, "credentials", _tok.get_passphrase())
         for r in creds:
             if r.get("user") == user:
                 r["password"] = new_pwd
                 r["is_hashed_password"] = "FALSE"
-        db.write_db(handle, creds, "credentials")
+        db.write_db(handle, creds, "credentials", _tok.get_passphrase())
     elif kind == "sql":
         db_sql.update_sql_db(handle, "credentials", {"password": hash_pwd(new_pwd)}, "user", user)
     force_chg_pwd(user, True)
     # mot de passe genere par un admin : pas d'expiration, annule un mot de passe mail en attente
     set_temp_pwd_expire(user, "")
+    # et remet a 0 le compteur de resets en libre-service (comme le source)
+    set_pwd_mngt_optional(user, N_USER_RESET, 0, empty=0)
     return new_pwd
 
 
@@ -244,14 +267,27 @@ def list_users() -> list[dict[str, Any]]:
 
 
 def list_pwds() -> list[dict[str, Any]]:
-    """Retourne pwd_mngt sans `n_wrong_pwd` ni `temp_pwd_expire` (module-admin.R:300-305)."""
+    """Retourne pwd_mngt pour l'admin (module-admin.R).
+
+    Sans `n_wrong_pwd` ni `temp_pwd_expire` ; colonne `Locked` ("TRUE"/"FALSE") quand une limite
+    d'echecs est posee ; `n_user_reset` montre seulement quand une limite de resets est posee.
+    """
     kind, handle = _active()
     if kind is None:
         return []
-    return [
-        {k: v for k, v in r.items() if k not in ("n_wrong_pwd", TEMP_PWD_EXPIRE)}
-        for r in _read(kind, handle, "pwd_mngt")
-    ]
+    limit = settings.get_pwd_failure_limit()
+    hidden = ["n_wrong_pwd", TEMP_PWD_EXPIRE]
+    if math.isinf(settings.get_reset_password_max()):
+        hidden.append(N_USER_RESET)
+    out = []
+    for r in _read(kind, handle, "pwd_mngt"):
+        row = {k: v for k, v in r.items() if k not in hidden}
+        if "n_wrong_pwd" in r and settings.is_finite_limit(limit):
+            n = r.get("n_wrong_pwd")
+            locked = n is not None and float(n) >= float(limit)
+            row["Locked"] = "TRUE" if locked else "FALSE"
+        out.append(row)
+    return out
 
 
 def users_csv() -> str:
@@ -367,7 +403,7 @@ def pwds_table_html(pwds: list[dict[str, Any]], language: str = "en", ns: str = 
             ),
         ],
         group_id=f"{ns}-change_mult_pwds",
-        yes_no_cols=("must_change", "have_changed"),
+        yes_no_cols=("must_change", "have_changed", "Locked"),
     )
 
 
@@ -667,7 +703,7 @@ def admin_ui(language: str = "en") -> ui.TagList:
                             ),
                             class_="btn-primary center-block",
                         ),
-                        # Espace demande par Jeremy (2026-07-16) entre le bouton de
+                        # Espace volontaire entre le bouton de
                         # telechargement et la section Passwords. Le source n'en met pas ->
                         # deviation cosmetique assumee.
                         ui.tags.br(),
@@ -744,7 +780,7 @@ def admin_server(
 ) -> None:  # pragma: no cover
     """Serveur du panneau admin (port de la fonction `admin` de module-admin.R).
 
-    Le cablage reactif est exclu de la couverture (approche DU1) : les operations sous-jacentes
+    Le cablage reactif est exclu de la couverture : les operations sous-jacentes
     sont testees en integration, la structure d'UI est verifiee par les tests de structure.
     """
     from shinymanager.secure_app import COOKIE_NAME
@@ -772,6 +808,10 @@ def admin_server(
     root_conn = session.root_scope().http_conn
     token_start = root_conn.cookies.get(COOKIE_NAME) if root_conn else None
     current_user = _tok.get_user(token_start) if token_start else None
+
+    def admin_allowed() -> bool:
+        """Reverifie avant chaque ecriture / telechargement que le token est actif et admin."""
+        return _tok.is_active(token_start) and _tok.is_admin(token_start)
 
     update_read_db = reactive.value(0)
 
@@ -878,7 +918,7 @@ def admin_server(
     async def _on_users_selected() -> None:
         selected = _selected("select_mult_users")
         await _toggle("remove_selected_users", len(selected) > 0)
-        # DEVIATION assumee vs source (Jeremy 2026-07-16) : le source desactive "edit selected"
+        # DEVIATION assumee vs source : le source desactive "edit selected"
         # tant qu'un seul user est coche (on edite un unique via le crayon de ligne). Ici on
         # l'active des 1 selectionne ; l'edition d'un user unique passe alors en mode complet
         # (cf. _edit_selected).
@@ -909,6 +949,7 @@ def admin_server(
     @reactive.effect
     @reactive.event(input.delete_user)
     def _delete_user() -> None:
+        req(admin_allowed())
         ui.modal_show(_spinner_modal())
         delete_user(input.remove_user())
         ui.modal_remove()
@@ -923,6 +964,7 @@ def admin_server(
     @reactive.effect
     @reactive.event(input.delete_selected_users)
     def _delete_selected() -> None:
+        req(admin_allowed())
         ui.modal_show(_spinner_modal())
         delete_users(_selected("select_mult_users"))
         ui.modal_remove()
@@ -936,8 +978,7 @@ def admin_server(
         if max_users is not None and len(users()) >= max_users:
             ui.modal_show(
                 ui.modal(
-                    # Cle absente du dictionnaire du source (espaces autour du ':') : texte brut.
-                    lan.get("Maximum number of users : %s") % max_users,
+                    lan.get("Maximum number of users: %s") % max_users,
                     title=lan.get("Too many users"),
                 )
             )
@@ -971,6 +1012,7 @@ def admin_server(
     @reactive.effect
     @reactive.event(input.added_user)
     def _add_user() -> None:
+        req(admin_allowed())
         values = _modal_values(add_ns, with_password=True)
         must_change = bool(values.pop("must_change", True))
         password = values.pop("password", None)
@@ -1030,6 +1072,7 @@ def admin_server(
     @reactive.effect
     @reactive.event(input.edited_user)
     def _edit_user() -> None:
+        req(admin_allowed())
         values = _modal_values(edit_ns)
         enabled_null = bool(values.pop("_sm_enabled_null", True))
         changes = apply_edit(values, _columns(_credentials()), enabled_null=enabled_null)
@@ -1038,8 +1081,7 @@ def admin_server(
             edit_user(input.edit_user(), changes)
         except Exception:
             ui.modal_remove()
-            # Cle absente du dictionnaire du source : texte brut.
-            ui.notification_show(lan.get("Fail to update user"), type="error")
+            ui.notification_show(lan.get("Failed to update user"), type="error")
             return
         ui.modal_remove()
         ui.notification_show(lan.get("User successfully updated"), type="message")
@@ -1069,11 +1111,12 @@ def admin_server(
     @reactive.effect
     @reactive.event(input.edited_mult_user)
     def _edit_selected() -> None:
+        req(admin_allowed())
         selected = _selected("select_mult_users")
         values = _modal_values(mult_ns)
         columns = _columns(_credentials())
         if len(selected) == 1:
-            # DEVIATION assumee (Jeremy 2026-07-16) : 1 seul selectionne -> edition COMPLETE
+            # DEVIATION assumee : 1 seul selectionne -> edition COMPLETE
             # (user/admin editables, `_sm_enabled_null` respecte), comme le crayon de ligne.
             # La modale s'est deja rendue en mode simple (edit_user_inputs, len==1).
             enabled_null = bool(values.pop("_sm_enabled_null", True))
@@ -1091,7 +1134,7 @@ def admin_server(
                 edit_user(user, changes)
         except Exception:
             ui.modal_remove()
-            ui.notification_show(lan.get("Fail to update user"), type="error")
+            ui.notification_show(lan.get("Failed to update user"), type="error")
             return
         ui.modal_remove()
         ui.notification_show(lan.get("User successfully updated"), type="message")
@@ -1107,6 +1150,7 @@ def admin_server(
     @reactive.effect
     @reactive.event(input.changed_password)
     def _change_pwd() -> None:
+        req(admin_allowed())
         _apply_force_change([input.change_pwd()])
 
     @reactive.effect
@@ -1119,6 +1163,7 @@ def admin_server(
     @reactive.effect
     @reactive.event(input.changed_password_users)
     def _change_selected_pwds() -> None:
+        req(admin_allowed())
         _apply_force_change(_selected("change_mult_pwds"))
 
     def _apply_force_change(targets: list[str]) -> None:
@@ -1142,14 +1187,12 @@ def admin_server(
     @reactive.effect
     @reactive.event(input.reseted_password)
     def _reset_pwd() -> None:
+        req(admin_allowed())
         ui.modal_show(_spinner_modal())
         try:
             password = reset_password(input.reset_pwd())
         except Exception:
             ui.modal_remove()
-            # Cle du source pour CE site (module-admin.R:824) : "Failed to update user", qui est
-            # traduite. A ne pas confondre avec "Fail to update user" (module-admin.R:536/600,
-            # edition), qui est absente du dictionnaire.
             ui.notification_show(lan.get("Failed to update user"), type="error")
             return
         ui.modal_remove()
@@ -1167,12 +1210,14 @@ def admin_server(
 
     @render.download(filename=lambda: f"shinymanager-users-{date.today()}.csv")
     def download_users_database():
-        if "users" not in (settings.get_option("download") or []):
+        if not admin_allowed() or "users" not in (settings.get_option("download") or []):
             return
         yield users_csv()
 
     @render.download(filename=lambda: f"shinymanager-sql-{date.today()}.sqlite")
     def download_sql_database():
+        if not admin_allowed():
+            return
         kind, handle = _active()
         if "db" not in (settings.get_option("download") or []) or kind != "sqlite":
             return

@@ -1,20 +1,20 @@
 """Store de tokens d'authentification en memoire (source R/tokens.R, singleton `.tok`).
 
-Module 2 du plan. Fidelite PORTAGE_1_1. Le store est un objet a etat de processus (comme le
-singleton R6 `.tok`). Limite multi-workers documentee (plan §5, zone de flou tokens ZF-3) :
+Port fidele. Le store est un objet a etat de processus (comme le
+singleton R6 `.tok`). Limite multi-workers documentee :
 l'implementation par defaut reste en memoire de processus, sans sur-conception.
 
 Quirks du source reproduits (decision "source fait foi") :
-  - `is_valid` a une semantique anti-rejeu a usage unique (ZF-1) : valide au premier appel,
+  - `is_valid` a une semantique anti-rejeu a usage unique : valide au premier appel,
     False ensuite jusqu'a `reset_count`. Ce mecanisme est lie au token dans l'URL ; son usage
-    reel sous transport par cookie (D3) sera tranche au module 11 (secure_app).
-  - `is_admin` suit la coercition R `as.logical` (ZF via idiomes "Vecteurs et types") : seules
+    reel sous transport par cookie est tranche dans secure_app.
+  - `is_admin` suit la coercition R `as.logical` : seules
     les chaines "T"/"TRUE"/"True"/"true" (ou le booleen True) sont admin ; tout le reste, y
     compris "FALSE", "1", "yes", None, est non-admin.
 
-ECART ASSUME (decision DT1, gate module 2) : `remove` purge desormais TOUT (tokens, infos
+Ecart volontaire avec le package R : `remove` purge desormais TOUT (tokens, infos
 utilisateur, compteur), la ou le source ne retirait que la liste des tokens valides (fuite
-memoire + retention d'infos apres logout, ZF-2). get()/get_user() renvoient donc None apres
+memoire + retention d'infos apres logout). get()/get_user() renvoient donc None apres
 remove, contrairement au source.
 """
 
@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import secrets
+import threading
 import time
 from typing import Any
 
@@ -37,6 +38,8 @@ def _r_as_logical_is_true(value: Any) -> bool:
         return value
     if isinstance(value, str):
         return value in _R_TRUE
+    if isinstance(value, (int, float)):
+        return value == value and value != 0  # as.logical(1) = TRUE ; NaN -> NA
     return False
 
 
@@ -53,6 +56,9 @@ class TokenStore:
         self._passphrase: str | None = None
         self._timeout: float = 0
         self._send_mail: Any = None
+        # Heure du dernier reset en libre-service reussi, par utilisateur (en memoire).
+        self._reset_times: dict[str, float] = {}
+        self._reset_lock = threading.Lock()
 
     def generate(self, user: str) -> str:
         """Genere un token opaque (HMAC-SHA256 de user+horodatage, cle aleatoire jetee)."""
@@ -69,7 +75,7 @@ class TokenStore:
         self._tokens_user[token] = info
 
     def is_valid(self, token: str | None) -> bool:
-        """Valide un token AVEC anti-rejeu : True au premier appel, False ensuite (ZF-1)."""
+        """Valide un token AVEC anti-rejeu : True au premier appel, False ensuite."""
         valid = token in self._tokens
         count = self._tokens_count.count(token)
         self._tokens_count.append(token)
@@ -83,7 +89,7 @@ class TokenStore:
         """Indique si le token n'a pas expire par inactivite ; rafraichit l'horodatage si valide.
 
         Timeout <= 0 desactive l'expiration. Un token inconnu (pas d'horodatage) est considere
-        valide par ce chemin (ZF-4, comportement source).
+        valide par ce chemin (comportement source).
         """
         info = self._tokens_user.get(token)
         datetime = info.get("shinymanager_datetime") if info else None
@@ -94,6 +100,12 @@ class TokenStore:
         if valid and update and info is not None:
             info["shinymanager_datetime"] = time.time()
         return valid
+
+    def is_active(self, token: str | None) -> bool:
+        """Token valide cote serveur : ni revoque ni expire, sans effet de bord."""
+        if not token or not self.is_valid_server(token):
+            return False
+        return self.is_valid_timeout(token, update=False)
 
     def reset_count(self, token: str) -> None:
         """Retire toutes les occurrences du token du compteur (redonne un credit is_valid)."""
@@ -117,7 +129,7 @@ class TokenStore:
         return _r_as_logical_is_true(info.get("admin")) if info else False
 
     def remove(self, token: str) -> None:
-        """Invalide un token et purge ses infos (ECART ASSUME vs source, DT1/ZF-2)."""
+        """Invalide un token et purge ses infos (ecart volontaire vs source)."""
         if not self._tokens:
             return
         self._tokens = [t for t in self._tokens if t != token]
@@ -157,12 +169,32 @@ class TokenStore:
         return self._timeout
 
     def set_send_mail(self, send_mail: Any) -> None:
-        """Enregistre la fonction d'envoi de mail du reset (1.1.1.1 ; None = pas d'envoi)."""
+        """Enregistre la fonction d'envoi de mail du reset (None = pas d'envoi)."""
         self._send_mail = send_mail
 
     def get_send_mail(self) -> Any:
         """Retourne la fonction d'envoi de mail configuree (ou None)."""
         return self._send_mail
+
+    def claim_reset(self, user: str, delay: float) -> bool:
+        """Reserve un reset pour `user` : False s'il a eu un mail il y a moins de `delay` s.
+
+        Equivalent de `is_reset_too_soon` + `set_reset_time` du source, mais controle
+        et ecriture sous le meme verrou : les demandes passent par un threadpool, deux demandes
+        simultanees ne doivent pas passer toutes les deux (en R, process unique). En memoire :
+        perdu au redemarrage, propre a chaque worker.
+        """
+        with self._reset_lock:
+            last = self._reset_times.get(user)
+            if last is not None and (time.time() - last) < delay:
+                return False
+            self._reset_times[user] = time.time()
+            return True
+
+    def release_reset(self, user: str) -> None:
+        """Annule une reservation `claim_reset` quand aucun mail n'est parti."""
+        with self._reset_lock:
+            self._reset_times.pop(user, None)
 
 
 #: Instance de processus (equivalent du singleton `.tok` de R).

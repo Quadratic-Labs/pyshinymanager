@@ -1,6 +1,6 @@
-"""Phase 7+8 — validation et tests du backend SQL (module db_sql).
+"""Validation et tests du backend SQL (module db_sql).
 
-Le contrat de config ayant ete redessine (DS1 option A), il n'y a pas d'oracle differentiel
+Le contrat de config ayant ete redessine, il n'y a pas d'oracle differentiel
 contre le backend SQL du source (contrat YAML different). La validation repose sur :
   - un round-trip contre SQLite via SQLAlchemy (vrai moteur SQL, sans infra externe) ;
   - une coherence CROISEE avec le backend SQLite (module db), lui-meme valide contre R :
@@ -77,9 +77,11 @@ def test_write_sql_db_appends_and_hashes(conf):
 
 def test_env_var_secret_interpolation(monkeypatch, tmp_path):
     monkeypatch.setenv("SM_TEST_DB", str(tmp_path / "env.sqlite"))
-    conf = {"connection": {"url": "sqlite:///${SM_TEST_DB}"}}
+    # ${VAR} est interpole quand c'est la valeur ENTIERE d'un champ (pas au milieu d'une URL).
+    conf = {"connection": {"drivername": "sqlite", "database": "${SM_TEST_DB}"}}
     assert create_sql_db(CREDENTIALS, conf) is True
     assert len(read_table_sql(conf, "credentials")) == 2
+    assert (tmp_path / "env.sqlite").exists()
 
 
 def test_cross_backend_consistency_with_sqlite(conf, tmp_path):
@@ -151,3 +153,25 @@ def test_load_config_returns_a_dict_unchanged():
 
     conf = {"connection": {"url": "sqlite://"}}
     assert load_config(conf) is conf
+
+
+def test_schema_compiles_on_announced_dialects(conf, monkeypatch):
+    # VARCHAR sans longueur refuse par MySQL / MariaDB a la creation du schema.
+    from sqlalchemy import MetaData
+    from sqlalchemy.dialects import mssql, mysql, postgresql
+    from sqlalchemy.schema import CreateTable
+
+    captured = {}
+    real_create_all = MetaData.create_all
+
+    def capture(self, bind, **kw):
+        captured["metadata"] = self
+        return real_create_all(self, bind, **kw)
+
+    monkeypatch.setattr(MetaData, "create_all", capture)
+    create_sql_db(CREDENTIALS, conf)
+    tables = captured["metadata"].sorted_tables
+    assert {t.name for t in tables} == {"credentials", "pwd_mngt", "logs"}
+    for dialect in (mysql.dialect(), mssql.dialect(), postgresql.dialect()):
+        for table in tables:
+            CreateTable(table).compile(dialect=dialect)

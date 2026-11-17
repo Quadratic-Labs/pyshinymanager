@@ -1,4 +1,4 @@
-"""Phase 7 — validation differentielle du reset en libre-service (1.1.1.1) contre le source R.
+"""Validation differentielle du reset en libre-service contre le source R.
 
 Rejoue la sequence de oracle_reset_password.R sur le backend SQLite Python et compare les
 observables (codes reason, envoi du mail, mot de passe effectif, must_change, expiration, logs).

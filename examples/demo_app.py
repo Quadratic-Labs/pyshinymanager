@@ -3,9 +3,9 @@
 Lancer :  shiny run examples/demo_app.py
 Login de demo : user "admin" / mot de passe "admin123" (backend SQLite en clair, hache scrypt).
 
-Reset de mot de passe en libre-service (1.1.1.1) active : le lien "Forgot password?" envoie un
+Reset de mot de passe en libre-service active : le lien "Forgot password?" envoie un
 mot de passe temporaire, ici simplement ECRIT DANS LA CONSOLE (pas de serveur mail). Les emails
-sont dans la colonne `email` des credentials ; une base creee avant 1.1.1.1 n'en a pas : la
+sont dans la colonne `email` des credentials ; une base plus ancienne n'en a pas : la
 supprimer (demo_credentials.sqlite) pour la recreer.
 """
 
@@ -71,7 +71,7 @@ def send_mail(user, email, temp_password):
     print(f"[MAIL] to={email} | user={user} | temp_pwd={temp_password}", flush=True)
 
 
-#app = create_secure_app(
+# app = create_secure_app(
 #    app_content,
 #    check_credentials(str(_DB)),
 #    server=server,
@@ -79,7 +79,7 @@ def send_mail(user, email, temp_password):
 #    choose_language=True,
 #    tags_top=_login_image,  # <-- image centree en haut du panneau de login
 #    send_mail=send_mail,
-#)
+# )
 app = create_secure_app(
     app_content,
     check_credentials(str(_DB)),
@@ -91,6 +91,5 @@ app = create_secure_app(
     status="success",
     head_auth=ui.tags.style(".panel-auth h3 { color: #4582ec; font-weight: bold; }"),
     send_mail=send_mail,
-    choose_language=True
-    
+    choose_language=True,
 )

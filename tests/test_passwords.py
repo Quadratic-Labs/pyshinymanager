@@ -1,4 +1,4 @@
-"""Phase 8 — tests unitaires du module passwords (comportement, sans dependance R)."""
+"""Tests unitaires du module passwords (comportement, sans dependance R)."""
 
 import base64
 
