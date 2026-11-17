@@ -1,4 +1,4 @@
-"""Phase 8 — tests unitaires de check_credentials (comportement, sans dependance R)."""
+"""Tests unitaires de check_credentials (comportement, sans dependance R)."""
 
 import pytest
 
@@ -87,7 +87,7 @@ def test_sqlite_closure_sees_password_change(tmp_path):
     assert check("alice", "NewPass1")["result"] is True  # le nouveau marche, meme closure
 
 
-# --- Q4 : deviation sur start/expire (Jeremy 2026-07-16) ---
+# --- Deviation sur start/expire ---
 
 
 def test_empty_expire_is_not_reinjected_into_user_info():
@@ -120,3 +120,13 @@ def test_future_expiry_is_preserved_in_user_info():
     auth = check_credentials(creds)("u", "p")
     assert auth["result"] is True
     assert auth["user_info"]["expire"] == "2999-12-31"
+
+
+def test_missing_file_raises_a_clear_error(tmp_path):
+    # Comme en R : sinon sqlite3 cree un fichier vide et chaque login echoue sur "no such table".
+    missing = str(tmp_path / "nope.SQLITE")
+    with pytest.raises(FileNotFoundError, match="working directory"):
+        check_credentials(missing)
+    assert not (tmp_path / "nope.SQLITE").exists()
+    with pytest.raises(FileNotFoundError):
+        check_credentials(str(tmp_path / "conf.yml"))

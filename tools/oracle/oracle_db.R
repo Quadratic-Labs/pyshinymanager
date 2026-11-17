@@ -16,7 +16,7 @@ cred_file <- args[[2]]
 
 this_dir <- dirname(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)))
 if (length(this_dir) == 0 || !nzchar(this_dir)) this_dir <- "."
-src <- normalizePath(file.path(this_dir, "..", "..", "..", "source", Sys.getenv("SM_SOURCE", "shinymanager-1.1.1.1")), mustWork = TRUE)
+src <- normalizePath(Sys.getenv("SM_SOURCE_PATH", file.path(this_dir, "..", "..", "..", "source", Sys.getenv("SM_SOURCE", "shinymanager"))), mustWork = TRUE)
 suppressWarnings(suppressMessages(pkgload::load_all(src, quiet = TRUE, export_all = TRUE)))
 
 cred <- fromJSON(cred_file, simplifyDataFrame = TRUE)

@@ -1,13 +1,13 @@
 """Backend de credentials SQL externe (source R/credentials-db-sql.R).
 
-Module 5 du plan. Fidelite REDESIGN (decisions D1, D6, D8, et DS1 du gate module 5) :
-  - config **purement declarative** (DS1 option A) : connexion par parametres (driver par nom,
-    secrets via ``${ENV_VAR}``), noms de tables ; AUCUN code (`!expr` non porte, D1) et AUCUN
+Fidelite REDESIGN :
+  - config **purement declarative** : connexion par parametres (driver par nom,
+    secrets via ``${ENV_VAR}``), noms de tables ; AUCUN code (`!expr` non porte) et AUCUN
     SQL brut dans la config ;
   - le SQL est **genere par SQLAlchemy** (multi-SGBD), remplacant les templates glue_sql du YAML ;
   - le cache de connexion fragile du source (env de package) est remplace par un **engine
     SQLAlchemy** (pooling integre) ;
-  - backend **Spark/Databricks** (D6) : atteint via un **dialecte SQLAlchemy** (driver
+  - backend **Spark/Databricks** : atteint via un **dialecte SQLAlchemy** (driver
     databricks-sql-connector, extra optionnel `databricks`) par la MEME voie generique - pas de
     chemin de code specifique ni de dependance pyspark. Le source avait un chemin sparklyr ad hoc
     (table temporaire + INSERT BY NAME) ; ici c'est juste une URL de connexion. Validation sur un
@@ -32,6 +32,7 @@ from sqlalchemy import (
     MetaData,
     String,
     Table,
+    Text,
     create_engine,
     delete,
     insert,
@@ -51,7 +52,7 @@ _engines: dict[str, Engine] = {}
 
 
 def _resolve_secret(value: Any) -> Any:
-    """Interpole ``${ENV_VAR}`` depuis l'environnement (secrets hors config, esprit D1)."""
+    """Interpole ``${ENV_VAR}`` depuis l'environnement (secrets hors config)."""
     if isinstance(value, str):
         m = _ENV_RE.match(value)
         if m:
@@ -142,7 +143,7 @@ def create_sql_db(credentials_data: Any, conf: str | Path | dict[str, Any]) -> b
     engine = connect_sql_db(conf)
     insp = inspect(engine)
     pwd_table = _table_name(conf, "pwd_mngt")
-    # Idempotence (ZF-5) : n'inserer les users que si pwd_mngt n'existait pas avant.
+    # Idempotence : n'inserer les users que si pwd_mngt n'existait pas avant.
     init_user = not insp.has_table(pwd_table)
 
     extras = [c for c in columns if c not in _CRED_COLS]
@@ -150,32 +151,32 @@ def create_sql_db(credentials_data: Any, conf: str | Path | dict[str, Any]) -> b
     cred_tbl = Table(
         _table_name(conf, "credentials"),
         metadata,
-        Column("user", String, primary_key=True),
-        Column("password", String),
-        Column("start", String),
-        Column("expire", String),
-        Column("admin", String),
-        *[Column(c, String) for c in extras],
+        Column("user", String(100), primary_key=True),
+        Column("password", String(256)),
+        Column("start", String(100)),
+        Column("expire", String(100)),
+        Column("admin", String(100)),
+        *[Column(c, Text) for c in extras],
     )
     pwd_tbl = Table(
         pwd_table,
         metadata,
-        Column("user", String, primary_key=True),
-        Column("must_change", String),
-        Column("have_changed", String),
-        Column("date_change", String),
+        Column("user", String(100), primary_key=True),
+        Column("must_change", String(100)),
+        Column("have_changed", String(100)),
+        Column("date_change", String(100)),
         Column("n_wrong_pwd", Integer),
     )
     Table(
         _table_name(conf, "logs"),
         metadata,
         Column("id", Integer, primary_key=True, autoincrement=True),
-        Column("user", String),
-        Column("server_connected", String),
-        Column("token", String),
-        Column("logout", String),
-        Column("status", String),
-        Column("app", String),
+        Column("user", String(100)),
+        Column("server_connected", String(100)),
+        Column("token", String(100)),
+        Column("logout", String(100)),
+        Column("status", String(100)),
+        Column("app", String(100)),
     )
     metadata.create_all(engine)  # ne recree pas les tables existantes
 
@@ -237,6 +238,18 @@ def read_table_sql(conf: dict[str, Any], name: str = "credentials") -> list[dict
     tbl = Table(_table_name(conf, name), metadata, autoload_with=engine)
     with engine.connect() as cx:
         return [dict(row) for row in cx.execute(select(tbl)).mappings()]
+
+
+def column_types(conf: dict[str, Any], name: str) -> dict[str, Any]:
+    """Colonnes d'une table du backend SQL et leur type SQLAlchemy (nom -> type)."""
+    engine = connect_sql_db(conf)
+    tbl = Table(_table_name(conf, name), MetaData(), autoload_with=engine)
+    return {c.name: c.type for c in tbl.columns}
+
+
+def table(conf: dict[str, Any], name: str, bind: Any) -> Table:
+    """Table SQLAlchemy reflechie (pour les ecritures en transaction de l'appelant)."""
+    return Table(_table_name(conf, name), MetaData(), autoload_with=bind)
 
 
 def update_sql_db(

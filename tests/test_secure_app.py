@@ -1,8 +1,10 @@
-"""Phase 7+8 — routage et round-trip cookie de secure_app.
+"""Routage et round-trip cookie de secure_app.
 
 Le round-trip cookie (login -> cookie httponly -> app affichee -> logout) est valide en reel via
 `TestClient` (httpx) sur l'App ASGI assemblee, sans navigateur. Le routage pur est teste a part.
 """
+
+from types import SimpleNamespace
 
 import pytest
 from shiny import ui
@@ -82,6 +84,19 @@ def test_login_sets_httponly_cookie_and_grants_access(client):
     assert "sm-login-form" not in r2.text
 
 
+def test_token_cookie_secure_only_over_https():
+    # Secure en HTTPS ; en http (dev, reseau interne) le login doit rester possible.
+    check = check_credentials([{"user": "alice", "password": "azerty"}])
+    app = create_secure_app(ui.div("SECRET-CONTENT"), check)
+    data = {"user": "alice", "password": "azerty"}
+    for base_url, secure in (("http://testserver", False), ("https://testserver", True)):
+        r = TestClient(app, base_url=base_url).post("/sm-login", data=data, follow_redirects=False)
+        token_cookie = next(
+            c for c in r.headers.get_list("set-cookie") if c.startswith(f"{COOKIE_NAME}=")
+        )
+        assert ("secure" in token_cookie.lower()) is secure
+
+
 def test_wrong_password_redirects_to_error(client):
     r = client.post("/sm-login", data={"user": "alice", "password": "bad"}, follow_redirects=False)
     assert r.status_code == 303
@@ -99,7 +114,7 @@ def test_logout_clears_cookie(client):
     assert "sm-login-form" in client.get("/").text
 
 
-# --- Page admin : assemblage navbar + options (cf. surface/admin-panel.md §1) ---
+# --- Page admin : assemblage navbar + options ---
 
 
 @pytest.fixture
@@ -212,7 +227,7 @@ def test_user_info_reads_the_token_from_the_root_session_cookie():
     assert out["applications"] == ["a", "b"]
 
 
-# --- Non-regression des ecarts trouves par le controle adversarial (2026-07-15) -------------
+# --- Non-regression des ecarts trouves par un controle adversarial --------------------------
 
 
 def test_logout_stamps_the_logout_column_before_forgetting_the_token(tmp_path):
@@ -346,3 +361,69 @@ def test_theme_reaches_login_and_pwd(tmp_path):
 
     assert deps(sa._login_page("en", theme=str(css))) - deps(sa._login_page("en"))
     assert deps(sa._pwd_page("en", theme=str(css))) - deps(sa._pwd_page("en"))
+
+
+# --- Modules admin / logs demarres seulement pour un token admin actif -------------------------
+
+
+def _wired_modules(monkeypatch, cookies, *, enable_admin=True):
+    from shinymanager import admin as admin_mod
+    from shinymanager import logs_view
+    from shinymanager.secure_app import secure_server
+
+    started = []
+    monkeypatch.setattr(admin_mod, "admin_server", lambda *a, **k: started.append("admin"))
+    monkeypatch.setattr(logs_view, "logs_server", lambda *a, **k: started.append("logs"))
+    server = secure_server(lambda u, p: {}, timeout=0, enable_admin=enable_admin)
+    server(SimpleNamespace(), SimpleNamespace(), _fake_session(cookies))
+    return started
+
+
+def test_admin_modules_not_started_on_login_page(monkeypatch, sqlite_admin_backend):
+    assert _wired_modules(monkeypatch, {}) == []
+
+
+def test_admin_modules_not_started_for_non_admin_or_revoked(monkeypatch, sqlite_admin_backend):
+    _tok.add("user_tok", {"user": "bob", "admin": "FALSE"})
+    assert _wired_modules(monkeypatch, {COOKIE_NAME: "user_tok"}) == []
+    _tok.add("old_tok", {"user": "alice", "admin": "TRUE"})
+    _tok.remove("old_tok")
+    assert _wired_modules(monkeypatch, {COOKIE_NAME: "old_tok"}) == []
+
+
+def test_admin_modules_not_started_when_admin_disabled(monkeypatch, sqlite_admin_backend):
+    _tok.add("adm", {"user": "alice", "admin": "TRUE"})
+    assert _wired_modules(monkeypatch, {COOKIE_NAME: "adm"}, enable_admin=False) == []
+
+
+def test_admin_modules_started_for_active_admin(monkeypatch, sqlite_admin_backend):
+    _tok.add("adm", {"user": "alice", "admin": "TRUE"})
+    assert _wired_modules(monkeypatch, {COOKIE_NAME: "adm"}) == ["admin", "logs"]
+
+
+def test_every_admin_write_handler_rechecks_the_admin_token():
+    # Defense en profondeur (comme le source) : chaque ecriture et chaque telechargement reverifie
+    # le token, meme si le module est demarre (token revoque / expire depuis).
+    import ast
+    import inspect
+
+    from shinymanager import admin as admin_mod
+
+    tree = ast.parse(inspect.getsource(admin_mod))
+    guarded = {
+        "_delete_user",
+        "_delete_selected",
+        "_add_user",
+        "_edit_user",
+        "_edit_selected",
+        "_change_pwd",
+        "_change_selected_pwds",
+        "_reset_pwd",
+        "download_users_database",
+        "download_sql_database",
+    }
+    found = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in guarded:
+            found[node.name] = "admin_allowed()" in ast.unparse(node.body[0])
+    assert found == dict.fromkeys(guarded, True)

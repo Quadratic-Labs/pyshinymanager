@@ -1,7 +1,7 @@
-"""Phase 8 — tests unitaires du cycle de vie du mot de passe (sans dependance R).
+"""Tests unitaires du cycle de vie du mot de passe (sans dependance R).
 
 Couvre : le backend SQL (coherence avec la logique validee sur SQLite), les deviations
-fail-closed D2 (chemins d'erreur), le cas sans backend, et l'expiration par pwd_validity.
+fail-closed (chemins d'erreur), le cas sans backend, et l'expiration par pwd_validity.
 """
 
 from datetime import date, timedelta
@@ -59,7 +59,7 @@ def test_sql_check_new_pwd_and_lock(sql_conf):
     assert pwd_lifecycle.check_locked_account("alice", 2) is True
 
 
-# --- Deviations fail-closed (D2) sur chemin d'erreur ---
+# --- Deviations fail-closed sur chemin d'erreur ---
 
 
 def test_check_new_pwd_fail_closed_on_error(tmp_path):

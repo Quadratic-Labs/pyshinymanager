@@ -1,11 +1,13 @@
-"""Phase 8 — tests du reset en libre-service (1.1.1.1) hors oracle.
+"""Tests du reset en libre-service hors oracle.
 
 Couvre : backend SQL (colonne d'expiration absente / presente, ordre des controles), admin
 (creation, reset admin, table), decision de login (mot de passe temporaire expire), routes HTTP
 de la page de login (TestClient), helper SMTP (serveur simule) et module reactif standalone.
 """
 
+import importlib
 import smtplib
+import warnings
 from typing import ClassVar
 
 import pytest
@@ -27,9 +29,12 @@ GENERIC = "If the account exists and an email address is associated with it"
 
 
 @pytest.fixture(autouse=True)
-def _reset():
+def _reset(monkeypatch):
     settings.reset_options()
     _tok.__init__()
+    reset_password._reset_link_warned.clear()
+    # delai minimal de la route (5 s) neutralise pour garder les tests rapides
+    monkeypatch.setattr(importlib.import_module("shinymanager.secure_app"), "RESET_BTN_DELAY", 0)
     yield
     settings.reset_options()
     _tok.__init__()
@@ -93,7 +98,7 @@ def test_reset_password_validity_infinite_means_no_expiration():
 
 
 def test_changes_made_during_mail_sending_are_kept(sqlite_path):
-    # Audit P1-1 : le reset tourne dans un thread ; une ecriture concurrente pendant l'envoi
+    # Le reset tourne dans un thread ; une ecriture concurrente pendant l'envoi
     # du mail ne doit pas etre ecrasee par une lecture perimee.
     def mail_with_concurrent_change(user, email, temp_password):
         pwd_lifecycle.update_pwd("admin", "Changed99")
@@ -137,12 +142,14 @@ def test_sql_reset_with_expire_column(sql_conf):
     assert read_table_sql(sql_conf, "pwd_mngt")[0]["temp_pwd_expire"] == ""
 
 
-def test_sql_unknown_user_checked_before_email_column(sql_conf):
-    # Quirk du source : en SQL l'utilisateur est teste avant la colonne email.
+def test_sql_email_column_checked_before_user(sql_conf):
+    # Comme le source : la colonne est controlee avant l'utilisateur, meme reponse connu / inconnu.
     _tok.set_send_mail(_Mailer())
     settings.set_option("email_column", "mail")
-    assert reset_password.reset_pwd_user_email("zoe", "z@x.com")["reason"] == "unknown_user"
-    assert reset_password.reset_pwd_user_email("fanny", "f@x.com")["reason"] == "no_email_column"
+    for user in ("zoe", "fanny"):
+        with pytest.warns(UserWarning, match="'mail' column"):
+            res = reset_password.reset_pwd_user_email(user, "z@x.com")
+        assert res["reason"] == "no_email_column"
 
 
 def test_no_backend_reason():
@@ -150,15 +157,22 @@ def test_no_backend_reason():
     assert reset_password.reset_pwd_user_email("fanny", "f@x.com")["reason"] == "backend"
 
 
-def test_db_error_after_mail(sqlite_path, monkeypatch):
+def test_db_error_after_mail_rolls_everything_back(sqlite_path, monkeypatch):
     _tok.set_send_mail(_Mailer())
+    real = reset_password.db.write_in_transaction
 
-    def boom(*_a, **_k):
-        raise OSError("disk full")
+    def boom(cx, value, name, passphrase=None):
+        if name == "pwd_mngt":
+            raise OSError("disk full")
+        real(cx, value, name, passphrase)
 
-    monkeypatch.setattr(reset_password.db, "write_db", boom)
-    res = reset_password.reset_pwd_user_email("fanny", "fanny@mail.com")
+    monkeypatch.setattr(reset_password.db, "write_in_transaction", boom)
+    with pytest.warns(UserWarning, match="unable to save the reset password"):
+        res = reset_password.reset_pwd_user_email("fanny", "fanny@mail.com")
     assert res == {"result": False, "reason": "db_error"}
+    # credentials ecrit avant l'erreur : annule par le rollback
+    fanny = next(r for r in read_db(sqlite_path, "credentials") if r["user"] == "fanny")
+    assert verify_pwd(fanny["password"], "azerty12")
 
 
 # --- Admin ---
@@ -217,16 +231,58 @@ def test_no_reset_link_without_option(sqlite_path):
 
 def test_reset_link_and_hidden_form_with_option(sqlite_path):
     settings.set_option("reset_password", True)
-    page = _client(sqlite_path).get("/").text
+    page = _client(sqlite_path, _Mailer()).get("/").text
     assert "Forgot password?" in page
     assert 'id="auth-reset_pwd_form"' in page and "display:none;" in page
     assert 'id="auth-reset_email"' in page
     settings.set_option("reset_password", "username")
-    assert 'id="auth-reset_email"' not in _client(sqlite_path).get("/").text
+    assert 'id="auth-reset_email"' not in _client(sqlite_path, _Mailer()).get("/").text
+
+
+def test_reset_link_hidden_when_reset_cannot_work(sqlite_path):
+    # Sans send_mail ou sans base, le lien menait toujours a un echec.
+    settings.set_option("reset_password", True)
+    with pytest.warns(UserWarning):
+        assert "Forgot password?" not in _client(sqlite_path).get("/").text
+    users = [{"user": "fanny", "password": "azerty12"}]
+    app = create_secure_app(ui.div("SECRET"), check_credentials(users), send_mail=_Mailer())
+    assert "Forgot password?" not in TestClient(app).get("/").text
+
+
+def test_reset_link_hidden_without_email_column(tmp_path):
+    # Comme le source : sans colonne email, le lien est masque avec un warning, une fois par raison.
+    path = str(tmp_path / "noemail.sqlite")
+    create_db([{"user": "fanny", "password": "azerty12"}], path)
+    settings.set_option("reset_password", True)
+    client = TestClient(
+        create_secure_app(ui.div("SECRET"), check_credentials(path), send_mail=_Mailer())
+    )
+    with pytest.warns(UserWarning, match="link is hidden: no 'email' column"):
+        assert "Forgot password?" not in client.get("/").text
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert "Forgot password?" not in client.get("/").text
+
+
+def test_reset_link_unavailable_reason(sqlite_path, sql_conf, monkeypatch):
+    assert "send_mail" in reset_password.reset_link_unavailable_reason()
+    _tok.set_send_mail(_Mailer())
+    _tok.set_sqlite_path(None)
+    assert reset_password.reset_link_unavailable_reason() is None  # SQL, colonne email
+    settings.set_option("email_column", "mail")
+    assert "'mail' column" in reset_password.reset_link_unavailable_reason()
+    _tok.set_sqlite_path(sqlite_path)
+    assert "'mail' column" in reset_password.reset_link_unavailable_reason()
+    settings.set_option("email_column", "email")
+    assert reset_password.reset_link_unavailable_reason() is None
+    # colonnes illisibles : lien garde, l'erreur se verra au reset (source)
+    monkeypatch.setattr(reset_password.db, "_read_table", lambda *a: 1 / 0)
+    assert reset_password.reset_link_unavailable_reason() is None
 
 
 def test_reset_route_same_message_whatever_the_outcome(sqlite_path):
     settings.set_option("reset_password", True)
+    settings.set_option("reset_password_cooldown", 0)
     mail = _Mailer()
     client = _client(sqlite_path, mail)
     pages = []
@@ -252,7 +308,7 @@ def test_reset_message_is_translated(sqlite_path):
         "/sm-reset-password", data={"user": "fanny", "email": "fanny@mail.com", "language": "fr"}
     )
     assert "Mot de passe oubli" in resp.text
-    assert "un mail contenant un mot de passe temporaire" in resp.text
+    assert "un mail contenant un mot de passe temporaire va" in resp.text
 
 
 def test_reset_route_inert_without_option(sqlite_path):
@@ -413,3 +469,200 @@ def test_no_warning_when_send_mail_given_or_option_off(sqlite_path, recwarn):
     settings.set_option("reset_password", True)
     _client(sqlite_path, _Mailer())
     assert not [w for w in recwarn if "send_mail" in str(w.message)]
+
+
+# --- Controles du compte, limites, messages, robustesse ---
+
+
+def _post_reset(client, user, email=None):
+    data = {"user": user, "language": "en"}
+    if email is not None:
+        data["email"] = email
+    return client.post("/sm-reset-password", data=data)
+
+
+def _statuses(path):
+    return [r["status"] for r in read_db(path, "logs")]
+
+
+def test_reset_route_empty_fields(sqlite_path):
+    settings.set_option("reset_password", True)
+    mail = _Mailer()
+    resp = _post_reset(_client(sqlite_path, mail), "fanny", " ")
+    assert "reset=empty" in str(resp.url)
+    assert "Please fill in all fields." in resp.text
+    assert mail.sent == [] and _statuses(sqlite_path) == []
+
+
+def test_cooldown_blocks_a_second_mail(sqlite_path):
+    settings.set_option("reset_password", "username")
+    mail = _Mailer()
+    client = _client(sqlite_path, mail)
+    _post_reset(client, "fanny")
+    resp = _post_reset(client, " fanny ")
+    assert "reset=sent" in str(resp.url)
+    assert len(mail.sent) == 1
+    assert _statuses(sqlite_path) == ["Reset password", "Reset password: too soon"]
+
+
+def test_failed_reset_does_not_start_the_cooldown(sqlite_path):
+    settings.set_option("reset_password", True)
+    mail = _Mailer()
+    client = _client(sqlite_path, mail)
+    _post_reset(client, "fanny", "bad@x.com")
+    _post_reset(client, "fanny", "fanny@mail.com")
+    assert len(mail.sent) == 1
+
+
+def test_no_reset_for_expired_or_unauthorized_account(tmp_path):
+    path = str(tmp_path / "db.sqlite")
+    rows = [
+        {"user": "old", "password": "azerty12", "email": "o@x.com", "expire": "2000-01-01"},
+        {"user": "other", "password": "azerty12", "email": "x@x.com"},
+    ]
+    rows[0]["applications"], rows[1]["applications"] = "app", "b"
+    create_db(rows, path)
+    _tok.set_sqlite_path(path)
+    settings.set_option("application", "app")
+    mail = _Mailer()
+    _tok.set_send_mail(mail)
+    assert reset_password.reset_pwd_user_email("old", "o@x.com")["reason"] == "account_expired"
+    assert reset_password.reset_pwd_user_email("other", "x@x.com")["reason"] == "unauthorized"
+    assert mail.sent == []
+
+
+def test_reset_password_max_blocks_and_counter_resets(sqlite_path):
+    settings.set_option("reset_password", "username")
+    settings.set_option("reset_password_cooldown", 0)
+    settings.set_option("reset_password_max", 1)
+    mail = _Mailer()
+    client = _client(sqlite_path, mail)
+    _post_reset(client, "fanny")
+    assert pwd_lifecycle.get_n_user_reset("fanny") == 1
+    resp = _post_reset(client, "fanny")
+    assert "reset=blocked" in str(resp.url)
+    assert "Password reset is not available for this account" in resp.text
+    assert len(mail.sent) == 1
+    assert _statuses(sqlite_path)[-1] == "Reset password: too many resets"
+    # colonne visible dans l'admin quand une limite est posee
+    assert "n_user_reset" in admin.list_pwds()[0]
+    # remis a 0 par un reset admin
+    admin.reset_password("fanny")
+    assert pwd_lifecycle.get_n_user_reset("fanny") == 0
+
+
+def test_successful_login_resets_counters_even_without_logs(sqlite_path):
+    from shinymanager.logs import save_logs, save_logs_failed
+
+    settings.set_option("reset_password_max", 3)
+    pwd_lifecycle.set_pwd_mngt_optional("fanny", "n_user_reset", 2, empty=0)
+    settings.set_option("write_logs", False)
+    save_logs_failed("fanny", "Wrong pwd")
+    _tok.add("tok", {"user": "fanny"})
+    save_logs("tok")
+    row = next(r for r in read_db(sqlite_path, "pwd_mngt") if r["user"] == "fanny")
+    assert row["n_wrong_pwd"] == 0 and row["n_user_reset"] == 0
+
+
+def test_reset_unlock_option(sqlite_path):
+    settings.set_option("pwd_failure_limit", 2)
+    for _ in range(2):
+        process_login("fanny", "wrong", check_credentials(sqlite_path))
+    mail = _Mailer()
+    _tok.set_send_mail(mail)
+    settings.set_option("reset_password_unlock", False)
+    res = reset_password.reset_pwd_user_email("fanny", "fanny@mail.com")
+    assert res["reason"] == "locked_account"
+    settings.set_option("reset_password_unlock", True)
+    assert reset_password.reset_pwd_user_email("fanny", "fanny@mail.com")["result"] is True
+    assert pwd_lifecycle.check_locked_account("fanny", 2) is False
+
+
+def test_mail_error_is_shown_and_logged(sqlite_path):
+    settings.set_option("reset_password", True)
+
+    def failing(*_a):
+        raise ConnectionError("smtp down")
+
+    with pytest.warns(UserWarning, match="unable to send the reset password email"):
+        resp = _post_reset(_client(sqlite_path, failing), "fanny", "fanny@mail.com")
+    assert "reset=mail_error" in str(resp.url)
+    assert "An error occurred while sending the email" in resp.text
+    assert _statuses(sqlite_path) == ["Reset password: mail failed"]
+
+
+def test_unexpected_db_error_does_not_crash_the_route(sqlite_path, monkeypatch):
+    settings.set_option("reset_password", True)
+
+    def boom(*_a, **_k):
+        raise OSError("database locked")
+
+    monkeypatch.setattr(reset_password, "_read", boom)
+    with pytest.warns(UserWarning, match="password reset failed"):
+        resp = _post_reset(_client(sqlite_path, _Mailer()), "fanny", "fanny@mail.com")
+    assert "reset=db_error" in str(resp.url)
+    assert "An error occurred while saving the new password" in resp.text
+
+
+def test_account_modified_while_sending_is_not_overwritten(sqlite_path):
+    def mail_and_admin_change(user, email, temp_password):
+        pwd_lifecycle.update_pwd("fanny", "ByAdmin99")
+
+    _tok.set_send_mail(mail_and_admin_change)
+    with pytest.warns(UserWarning, match="account modified while sending"):
+        res = reset_password.reset_pwd_user_email("fanny", "fanny@mail.com")
+    assert res["reason"] == "db_error"
+    fanny = next(r for r in read_db(sqlite_path, "credentials") if r["user"] == "fanny")
+    assert verify_pwd(fanny["password"], "ByAdmin99")
+
+
+def test_sql_account_modified_while_sending_is_not_overwritten(sql_conf):
+    def mail_and_admin_change(user, email, temp_password):
+        pwd_lifecycle.update_pwd("fanny", "ByAdmin99")
+
+    _tok.set_send_mail(mail_and_admin_change)
+    with pytest.warns(UserWarning, match="account modified while sending"):
+        res = reset_password.reset_pwd_user_email("fanny", "fanny@mail.com")
+    assert res["reason"] == "db_error"
+    assert verify_pwd(read_table_sql(sql_conf, "credentials")[0]["password"], "ByAdmin99")
+
+
+def test_missing_pwd_mngt_row_stops_before_sending(sqlite_path):
+    from shinymanager.db import write_db
+
+    rows = [r for r in read_db(sqlite_path, "pwd_mngt") if r["user"] != "fanny"]
+    write_db(sqlite_path, rows, "pwd_mngt")
+    mail = _Mailer()
+    _tok.set_send_mail(mail)
+    with pytest.warns(UserWarning, match="user not found in pwd_mngt"):
+        res = reset_password.reset_pwd_user_email("fanny", "fanny@mail.com")
+    assert res["reason"] == "db_error"
+    assert mail.sent == []
+
+
+def test_sql_timestamp_expire_column_stops_before_sending(sql_conf):
+    engine = create_engine(sql_conf["connection"]["url"])
+    with engine.begin() as cx:
+        cx.execute(text("ALTER TABLE pwd_mngt ADD COLUMN temp_pwd_expire TIMESTAMP"))
+    mail = _Mailer()
+    _tok.set_send_mail(mail)
+    with pytest.warns(UserWarning, match="must be a text column"):
+        res = reset_password.reset_pwd_user_email("fanny", "fanny@mail.com")
+    assert res["reason"] == "db_error"
+    assert mail.sent == []
+
+
+def test_stored_email_is_trimmed_before_sending(tmp_path):
+    path = str(tmp_path / "db.sqlite")
+    create_db([{"user": "fanny", "password": "azerty12", "email": " fanny@mail.com "}], path)
+    _tok.set_sqlite_path(path)
+    mail = _Mailer()
+    _tok.set_send_mail(mail)
+    reset_password.reset_pwd_user_email("fanny", "fanny@mail.com")
+    assert mail.sent[0][1] == "fanny@mail.com"
+
+
+def test_unknown_reset_code_shows_no_message(sqlite_path):
+    settings.set_option("reset_password", True)
+    page = _client(sqlite_path, _Mailer()).get("/?reset=<script>").text
+    assert 'id="auth-reset_pwd_msg"' not in page

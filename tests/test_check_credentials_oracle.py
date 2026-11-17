@@ -1,4 +1,4 @@
-"""Phase 7 — validation differentielle de check_credentials (chemin data.frame) contre R.
+"""Validation differentielle de check_credentials (chemin data.frame) contre R.
 
 Compare les 3 booleens du contrat (result/expired/authorized) sur 10 scenarios (clair, hash,
 expiration, applications). L'appname est fixe des deux cotes pour etre deterministe.

@@ -1,4 +1,4 @@
-"""Phase 8 — tests unitaires du module db (comportement, sans dependance R)."""
+"""Tests unitaires du module db (comportement, sans dependance R)."""
 
 import sqlite3
 

@@ -1,13 +1,13 @@
 """Bouton flottant (logout / admin / go to app) et heartbeat de timeout.
 
 Sources R/fab_button.R et inst/assets/timeout.js.
-Module 10 du plan. Fidelite IDIOMATIQUE (fab_button) + REDESIGN du heartbeat de timeout.
+Fidelite IDIOMATIQUE (fab_button) + REDESIGN du heartbeat de timeout.
 
-REDESIGN (corrige la zone de flou "sessions immortelles", assets-js ZF-2) : le heartbeat du
+REDESIGN (corrige les "sessions immortelles" du source) : le heartbeat du
 source ecoutait `shiny:recalculating`, donc tout output qui se recalcule (rafraichissement
 automatique) comptait comme activite et empechait l'expiration. Ici, l'activite est liee aux
 VRAIS evenements utilisateur (mousemove, keydown, click, scroll, touchstart). Le polyfill
-Object.assign du source n'est pas porte (navigateurs modernes, assets-js ZF-3).
+Object.assign du source n'est pas porte (navigateurs modernes).
 """
 
 from __future__ import annotations

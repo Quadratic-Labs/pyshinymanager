@@ -1,4 +1,4 @@
-"""Phase 8 — tests unitaires du store de tokens (comportement, sans dependance R)."""
+"""Tests unitaires du store de tokens (comportement, sans dependance R)."""
 
 import time
 
@@ -72,7 +72,7 @@ def test_r_as_logical_helper():
 
 
 def test_remove_purges_everything():
-    # ECART ASSUME (DT1) : contrairement au source, remove purge tout (pas de fuite ni de
+    # Ecart volontaire : contrairement au source, remove purge tout (pas de fuite ni de
     # retention d'infos apres logout).
     tok = TokenStore()
     tok.add("t", {"user": "u"})
@@ -110,7 +110,7 @@ def test_timeout_expires_and_update_refreshes():
 
 
 def test_timeout_unknown_token_is_valid():
-    # ZF-4 : un token inconnu (pas d'horodatage) n'est jamais expire par ce chemin.
+    # Un token inconnu (pas d'horodatage) n'est jamais expire par ce chemin.
     tok = TokenStore()
     tok.set_timeout(15)
     assert tok.is_valid_timeout("never") is True
@@ -126,3 +126,32 @@ def test_config_setters_getters():
     assert tok.get_passphrase() == "secret"
     assert tok.get_timeout() == 15
     assert tok.get_sql_config_db() == {"driver": "pg"}
+
+
+# --- is_active et delai entre deux resets ---------------------------------------------------
+
+
+def test_is_active_requires_a_known_and_not_timed_out_token(monkeypatch):
+    store = TokenStore()
+    assert not store.is_active(None)
+    assert not store.is_active("unknown")
+    store.add("t", {"user": "alice"})
+    assert store.is_active("t")
+    store.set_timeout(1)
+    import time as time_mod
+
+    now = time_mod.time()
+    monkeypatch.setattr(time_mod, "time", lambda: now + 120)
+    assert not store.is_active("t")
+    store.remove("t")
+    assert not store.is_active("t")
+
+
+def test_claim_reset_blocks_a_second_reset_within_the_cooldown():
+    store = TokenStore()
+    assert store.claim_reset("alice", 60)
+    assert not store.claim_reset("alice", 60)
+    assert store.claim_reset("bob", 60)
+    store.release_reset("alice")
+    assert store.claim_reset("alice", 60)
+    assert store.claim_reset("carol", 0) and store.claim_reset("carol", 0)

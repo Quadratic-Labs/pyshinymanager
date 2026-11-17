@@ -1,20 +1,22 @@
 """Enveloppe d'authentification d'une app Shiny (source R/secure-app.R).
 
-Module 11 du plan. Fidelite IDIOMATIQUE. Assemble toute l'application :
+Fidelite IDIOMATIQUE. Assemble toute l'application :
   - `secure_app(ui)` retourne une UI fonction de la requete qui ROUTE selon le token de cookie
     (login / changement de mot de passe / admin / app protegee) ;
-  - le token transite par un cookie **httponly + samesite=strict** (D3, decision DA1 option A),
-    pose par une route ASGI de login (`/sm-login`) qui reutilise `process_login` (module 8) ;
+  - le token transite par un cookie **httponly + samesite=strict**,
+    pose par une route ASGI de login (`/sm-login`) qui reutilise `process_login` (auth_module) ;
   - `/sm-logout` invalide le token et efface le cookie ;
   - `create_secure_app(...)` assemble l'App py-shiny et installe ces routes.
 
 Le routage sous cookie utilise `is_valid_server` (appartenance) et non le `is_valid` one-shot du
-source : l'anti-rejeu one-shot protegeait le token dans l'URL, sans objet avec un cookie serveur
-(resolution de tokens ZF-1).
+source : l'anti-rejeu one-shot protegeait le token dans l'URL, sans objet avec un cookie serveur.
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
+import time
 import warnings
 from collections.abc import Callable
 from importlib.resources import files
@@ -35,7 +37,14 @@ from shinymanager.i18n import Language, use_language
 from shinymanager.logs import logout_logs, save_logs
 from shinymanager.pwd_lifecycle import is_force_chg_pwd
 from shinymanager.pwd_module import pwd_server, pwd_ui
-from shinymanager.reset_password import reset_pwd_user_email, save_reset_logs
+from shinymanager.reset_password import (
+    RESET_BTN_DELAY,
+    RESET_MESSAGES,
+    handle_reset_request,
+    reset_link_unavailable_reason,
+    reset_result_code,
+    warn_reset_link_hidden,
+)
 from shinymanager.tokens import _tok
 
 COOKIE_NAME = "shinymanager"
@@ -133,7 +142,7 @@ def _language_selector(language: str, choose_language: Any) -> ui.Tag | None:
             class_="form-select d-inline-block",
             style="width:auto;",
             # Les messages transitoires (?error=, ?reset=) ne survivent pas au changement de
-            # langue (module-auth.R 1.1.1.1 : removeUI de msg_auth et reset_pwd_msg).
+            # langue (module-auth.R : removeUI de msg_auth et reset_pwd_msg).
             onchange="var p=new URLSearchParams(location.search);p.delete('error');"
             "p.delete('reset');var q=p.toString();"
             "var n=encodeURIComponent(location.pathname+(q?'?'+q:''));"
@@ -158,7 +167,7 @@ def _login_page(
 ) -> ui.Tag:
     """Page de login fidele au source (auth_ui) : panneau centre, i18n, selecteur de langue.
 
-    Le token est pose par la route /sm-login (cookie httponly, DA1) : le panneau est donc un
+    Le token est pose par la route /sm-login (cookie httponly) : le panneau est donc un
     formulaire POST reproduisant la structure/les libelles du source.
 
     Args:
@@ -166,8 +175,8 @@ def _login_page(
         error: code d'erreur de `LOGIN_ERRORS` (transmis par /sm-login via ?error=). Un code
             inconnu n'affiche AUCUN message : la liste blanche interdit d'injecter du texte
             arbitraire dans la page via l'URL.
-        reset: "sent" apres une demande de reset (transmis par /sm-reset-password via ?reset=) :
-            affiche le message generique. Toute autre valeur est ignoree (liste blanche).
+        reset: code de resultat d'une demande de reset (transmis par /sm-reset-password via
+            ?reset=), cle de `RESET_MESSAGES`. Toute autre valeur est ignoree (liste blanche).
         status: statut bootstrap du panneau et du bouton.
         tags_top: contenu libre au-dessus du titre.
         tags_bottom: contenu libre sous le formulaire.
@@ -221,7 +230,7 @@ def _login_page(
             action="/sm-login",
             id="sm-login-form",
         ),
-        _reset_password_block(lan, language, reset == "sent"),
+        _reset_password_block(lan, language, reset if reset in RESET_MESSAGES else None),
         ui.tags.div(msg, id="auth-result_auth"),
         tags_bottom,
         # `card-body` restitue le padding du `.panel-body` Bootstrap 3 du source (absent en BS5).
@@ -260,29 +269,45 @@ def _text_field(lan: Language, label_key: str, input_id: str, name: str) -> ui.T
     )
 
 
-def _reset_password_block(lan: Language, language: str, sent: bool) -> ui.TagList | None:
-    """Lien "Forgot password?" + panneau de reset (port de module-auth.R, 1.1.1.1).
+def _reset_password_block(lan: Language, language: str, code: str | None) -> ui.TagList | None:
+    """Lien "Forgot password?" + panneau de reset (port de module-auth.R).
 
-    Affiche seulement si l'option `reset_password` est active. Le source insere le panneau cote
-    serveur (insertUI) ; sous DA1 la page de login n'a pas de session reactive : le panneau est
-    deplie en JS et soumis a la route `/sm-reset-password`, qui renvoie ici avec `?reset=sent`.
-    Le message est TOUJOURS le meme (anti-enumeration).
+    Affiche seulement si l'option `reset_password` est active ET que le reset peut marcher
+    (`send_mail` fourni, backend SQLite / SQL, colonne email), sinon warning. Le source
+    insere le panneau cote serveur (insertUI) ; ici la page de login n'a pas de session
+    reactive : le panneau est deplie en JS et soumis a la route `/sm-reset-password`, qui renvoie
+    ici avec `?reset=<code>`.
+    A l'envoi, le bouton est desactive et le message generique affiche tout de suite, comme le
+    source (le traitement prend au moins `RESET_BTN_DELAY` secondes).
     """
     if not settings.reset_password_enabled():
         return None
-    result = (
-        ui.tags.div(
-            icon_svg("circle-info"),
-            " "
-            + lan.get(
-                "If the account exists and an email address is associated with it, an email "
-                "containing a temporary password has been sent."
-            ),
+    reason = reset_link_unavailable_reason()
+    if reason is not None:
+        warn_reset_link_hidden(reason)
+        return None
+    result = None
+    if code is not None:
+        key, alert = RESET_MESSAGES[code]
+        result = ui.tags.div(
+            icon_svg("circle-info" if alert == "info" else "triangle-exclamation"),
+            " " + lan.get(key),
             id="auth-reset_pwd_msg",
-            class_="alert alert-info",
+            class_=f"alert alert-{alert}",
         )
-        if sent
-        else None
+    generic = ui.tags.div(
+        icon_svg("circle-info"),
+        " " + lan.get(RESET_MESSAGES["sent"][0]),
+        id="auth-reset_pwd_msg",
+        class_="alert alert-info",
+    )
+    # A l'envoi : bouton desactive (pas de seconde demande) et message generique immediat.
+    submit_js = (
+        "document.getElementById('auth-do_reset_pwd').disabled=true;"
+        "var m=document.getElementById('auth-reset_pwd_msg');if(m){m.remove();}"
+        "document.getElementById('auth-reset_pwd_result').insertAdjacentHTML('beforeend',"
+        + json.dumps(str(generic))
+        + ");"
     )
     # Re-cliquer le lien recree un formulaire vierge, sans message (removeUI + insertUI du source).
     show_js = (
@@ -308,7 +333,8 @@ def _reset_password_block(lan: Language, language: str, sent: bool) -> ui.TagLis
         method="post",
         action="/sm-reset-password",
         id="auth-reset_pwd_form",
-        style=None if sent else "display:none;",
+        onsubmit=submit_js,
+        style=None if code is not None else "display:none;",
     )
     return ui.TagList(
         # Le source place 2 <br> sous le bouton Login (container-btn-ok) : sans eux, la marge
@@ -478,9 +504,7 @@ def secure_app(
         # ou au login), pour que l'UI et le serveur soient TOUJOURS coherents. `?language=` n'est
         # lu qu'a defaut de cookie (1re visite avant tout choix). Validee (liste blanche).
         lang = _check_language(
-            request.cookies.get(LANG_COOKIE)
-            or request.query_params.get("language")
-            or language
+            request.cookies.get(LANG_COOKIE) or request.query_params.get("language") or language
         )
         admin_requested = request.query_params.get("admin") == "true"
         page = _route(
@@ -583,6 +607,7 @@ def secure_server(
     max_users: int | None = None,
     file_encoding: str = "",
     send_mail: Callable[[str, str, str], Any] | None = None,
+    enable_admin: bool = False,
 ) -> Callable[[Inputs, Outputs, Session], Any]:
     """Orchestre le serveur securise (timeout, module mot de passe ; equivalent secure_server R).
 
@@ -593,6 +618,10 @@ def secure_server(
     Le login/logout passent par des routes ASGI (cf. create_secure_app) ; ce serveur cable le
     module de changement de mot de passe et le timeout d'inactivite.
 
+    Les modules admin et logs ne sont demarres que pour un token actif et admin, avec
+    `enable_admin` et un backend (comme le source) : l'UI admin est cachee sinon, mais ses
+    inputs pourraient quand meme etre envoyes au serveur depuis la console du navigateur.
+
     Returns:
         La fonction serveur. Appelee, elle retourne un `reactive.calc` des infos utilisateur
         (equivalent du `reactiveValues` retourne par le source). Depuis le serveur d'une app
@@ -600,8 +629,8 @@ def secure_server(
     """
     _tok.set_timeout(timeout)
     _tok.set_send_mail(send_mail)
-    # ECART ASSUME (Jeremy 2026-10-06) : le source ne previent pas. Sans `send_mail`, le lien
-    # "Forgot password?" s'affiche mais aucune demande n'aboutit, en silence.
+    # Ecart volontaire avec le package R : le source ne previent pas a la creation. Sans
+    # `send_mail`, le lien "Forgot password?" est masque : on dit pourquoi.
     if settings.reset_password_enabled() and send_mail is None:
         warnings.warn(
             "Option 'reset_password' is enabled but no 'send_mail' function was provided: "
@@ -616,15 +645,15 @@ def secure_server(
         # rendus serveur (tables admin, notifications) suivent la langue de l'utilisateur et non
         # la langue par defaut de l'app. Sans ca, l'UI etait en francais mais les tables anglaises.
         lang = _check_language((conn.cookies.get(LANG_COOKIE) if conn else None) or language)
-        # Modules cables inconditionnellement ; ils ne rendent que si leur UI est presente.
-        admin_module.admin_server(
-            "admin", language=lang, inputs_list=inputs_list, max_users=max_users
-        )
-        if settings.get_option("show_logs"):
-            logs_view.logs_server("logs", language=lang, file_encoding=file_encoding)
+        if enable_admin and _has_backend() and _tok.is_active(token) and _tok.is_admin(token):
+            admin_module.admin_server(
+                "admin", language=lang, inputs_list=inputs_list, max_users=max_users
+            )
+            if settings.get_option("show_logs"):
+                logs_view.logs_server("logs", language=lang, file_encoding=file_encoding)
         if token and is_force_chg_pwd(token):
             info = _tok.get(token) or {}
-            pwd_server("password", user=info, validate_pwd=validate_pwd, language=lang)
+            pwd_server("password", user=info, validate_pwd=validate_pwd, language=lang, token=token)
 
         # --- Expiration de session (port de secure-app.R:376-391) --------------------------
         # Sans ces deux observers, le heartbeat client ne sert a RIEN et aucun token n'expire.
@@ -667,7 +696,12 @@ def _make_login_handler(check_credentials: Callable[[str, str], dict]) -> Callab
         lang = _check_language(str(form.get("language", "")))
         if outcome.authenticated and token:
             resp = RedirectResponse("/", status_code=303)
-            resp.set_cookie(COOKIE_NAME, token, httponly=True, samesite="strict", path="/")
+            # Secure en HTTPS : le token ne repart pas en clair sur http://. Sans
+            # condition, une app servie en http (dev, reseau interne) ne pourrait plus se connecter.
+            secure = request.url.scheme == "https"
+            resp.set_cookie(
+                COOKIE_NAME, token, httponly=True, samesite="strict", path="/", secure=secure
+            )
             resp.set_cookie(LANG_COOKIE, lang, httponly=True, samesite="strict", path="/")
             return resp
         # Le source distingue 4 refus (verrouille / expire / non autorise / identifiants) :
@@ -682,20 +716,29 @@ def _make_login_handler(check_credentials: Callable[[str, str], dict]) -> Callab
 
 
 async def _reset_password_handler(request: Request) -> Response:
-    """Demande de reset du login (port de l'observeEvent do_reset_pwd, module-auth.R 1.1.1.1).
+    """Demande de reset du login (port de l'observeEvent do_reset_pwd, module-auth.R).
 
-    Le resultat est journalise cote admin mais JAMAIS montre : la page de login affiche toujours
-    le meme message generique. L'envoi du mail (bloquant) tourne hors de la boucle d'evenements.
+    Le resultat est journalise cote admin. Le visiteur voit le message generique, sauf un
+    compte qui ne peut pas etre reinitialise (message dedie) et une erreur d'envoi ou
+    d'enregistrement (message d'erreur), comme le source. Champs vides : message dedie, rien
+    n'est verifie, envoye ni journalise. La reponse prend au moins `RESET_BTN_DELAY` secondes
+    quelle que soit l'issue (temps de reponse sans indice sur les comptes). L'envoi du mail
+    (bloquant) tourne hors de la boucle d'evenements.
     """
     form = await request.form()
     lang = _check_language(str(form.get("language", "")))
     if not settings.reset_password_enabled():
         return RedirectResponse("/", status_code=303)
     user = str(form.get("user", ""))
-    email = form.get("email")
-    res = await run_in_threadpool(reset_pwd_user_email, user, None if email is None else str(email))
-    save_reset_logs(user, res["reason"])
-    resp = RedirectResponse(f"/?reset=sent&language={lang}", status_code=303)
+    email = None if settings.reset_password_username_only() else str(form.get("email", ""))
+    if not user.strip() or (email is not None and not email.strip()):
+        code = "empty"
+    else:
+        start = time.monotonic()
+        res = await run_in_threadpool(handle_reset_request, user, email)
+        code = reset_result_code(res["reason"])
+        await asyncio.sleep(max(0.0, RESET_BTN_DELAY - (time.monotonic() - start)))
+    resp = RedirectResponse(f"/?reset={code}&language={lang}", status_code=303)
     resp.set_cookie(LANG_COOKIE, lang, httponly=True, samesite="strict", path="/")
     return resp
 
@@ -718,10 +761,10 @@ async def _set_language_handler(request: Request) -> Response:
 async def _logout_handler(request: Request) -> Response:
     token = request.cookies.get(COOKIE_NAME)
     if token:
-        # Horodate la deconnexion AVANT d'oublier le token (le source a le meme ordre,
-        # secure-app.R:354-360 : logout_logs a besoin du token pour retrouver ses lignes).
-        logout_logs(token)
+        # Revoque d'abord, meme si les logs ne peuvent pas etre ecrits (comme en R). logout_logs ne
+        # lit que le token lui-meme (lignes de logs), pas le store : l'ordre est sans effet.
         _tok.remove(token)
+        logout_logs(token)
     resp = RedirectResponse("/", status_code=303)
     resp.delete_cookie(COOKIE_NAME, path="/")
     resp.delete_cookie(LANG_COOKIE, path="/")
@@ -777,6 +820,7 @@ def create_secure_app(
         max_users=max_users,
         file_encoding=file_encoding,
         send_mail=send_mail,
+        enable_admin=enable_admin,
     )
 
     def combined_server(input: Inputs, output: Outputs, session: Session) -> None:

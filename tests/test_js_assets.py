@@ -1,9 +1,9 @@
-"""Phase 8 — le JS produit et embarque doit au minimum PARSER.
+"""Le JS produit et embarque doit au minimum PARSER.
 
 Ne DECOUVRE pas ce test : il est ne d'un vrai defaut. `timeout_script` generait
 `['mousemove' 'keydown' ...]` (join sur une espace au lieu d'une virgule) : une erreur de
 syntaxe qui faisait echouer TOUT le script, donc aucun heartbeat d'activite, donc aucune
-expiration de session. Les 4 tests du module 10 verifiaient la structure de la balise et
+expiration de session. Les 4 tests du module fab verifiaient la structure de la balise et
 etaient verts : aucun ne parsait le JS.
 
 Ces tests exigent `node` (present sur la machine de dev, sinon ils sont ignores).

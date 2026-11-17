@@ -1,7 +1,7 @@
-"""Phase 7 — validation differentielle du cycle de vie (backend SQLite) contre le source R.
+"""Validation differentielle du cycle de vie (backend SQLite) contre le source R.
 
 Rejoue la meme sequence que oracle_pwd_lifecycle.R sur le backend SQLite Python et compare les
-valeurs observables. Les deviations D2 (fail-closed) sont testees a part (test_pwd_lifecycle.py).
+valeurs observables. Les deviations fail-closed sont testees a part (test_pwd_lifecycle.py).
 """
 
 import pytest

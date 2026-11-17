@@ -1,4 +1,4 @@
-"""Phase 7 — validation differentielle de la journalisation (backend SQLite) contre R."""
+"""Validation differentielle de la journalisation (backend SQLite) contre R."""
 
 import pytest
 

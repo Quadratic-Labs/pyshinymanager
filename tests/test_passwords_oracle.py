@@ -1,4 +1,4 @@
-"""Phase 7 — validation differentielle du module passwords contre le package R source.
+"""Validation differentielle du module passwords contre le package R source.
 
 Trois volets :
   1. R hache -> Python verifie (compat de format R -> Python).

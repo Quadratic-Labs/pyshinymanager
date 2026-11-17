@@ -1,6 +1,7 @@
 """Options globales de shinymanager (source R/utils.R : getOption('shinymanager.*')).
 
-Equivalent Python des 11 options de processus du package R (8 + 3 du reset en 1.1.1.1). Etat
+Equivalent Python des 14 options de processus du package R (8 + 6 du reset en libre-service,
+dont cooldown, max, unlock). Etat
 global mutable (comme les options R), lu par les modules pwd_lifecycle, logs et admin.
 `application` est resolu paresseusement (defaut = nom du repertoire courant, comme
 basename(getwd()) cote R).
@@ -21,10 +22,14 @@ _DEFAULTS: dict[str, Any] = {
     "download": ["db", "logs", "users"],
     "pwd_validity": math.inf,
     "pwd_failure_limit": math.inf,
-    # 1.1.1.1 : reinitialisation de mot de passe en libre-service (source R/utils.R).
+    # Reinitialisation de mot de passe en libre-service (source R/utils.R).
     "reset_password": False,  # False | True (user + email) | "username" (user seul)
     "email_column": "email",
     "reset_password_validity": None,  # minutes ; None = NA du source (pas d'expiration)
+    # Limites du reset en libre-service.
+    "reset_password_cooldown": 60,  # secondes entre deux mails au meme utilisateur ; 0 = aucune
+    "reset_password_max": math.inf,  # resets d'affilee ; inf = pas de limite
+    "reset_password_unlock": True,  # False : un compte verrouille ne se debloque que par l'admin
 }
 
 _options: dict[str, Any] = dict(_DEFAULTS)
@@ -90,3 +95,43 @@ def get_reset_password_validity() -> float | None:
     if math.isnan(validity) or validity <= 0 or math.isinf(validity):
         return None
     return validity
+
+
+def is_finite_limit(limit: Any) -> bool:
+    """True si `limit` est un nombre fini, i.e. une limite d'echecs est posee."""
+    try:
+        value = float(limit)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(value)
+
+
+def get_reset_password_cooldown() -> float:
+    """Delai minimal en SECONDES entre deux mails de reset au meme utilisateur.
+
+    Port de `get_reset_password_cooldown` : 60 par defaut (ou valeur invalide / negative), 0 pour
+    aucune limite.
+    """
+    try:
+        cooldown = float(get_option("reset_password_cooldown"))
+    except (TypeError, ValueError):
+        return 60.0
+    if math.isnan(cooldown) or cooldown < 0:
+        return 60.0
+    return cooldown
+
+
+def get_reset_password_max() -> float:
+    """Nombre maximal de resets d'affilee ; inf (defaut, invalide ou < 1) = pas de limite."""
+    try:
+        max_reset = float(get_option("reset_password_max"))
+    except (TypeError, ValueError):
+        return math.inf
+    if math.isnan(max_reset) or max_reset < 1:
+        return math.inf
+    return max_reset
+
+
+def reset_password_unlock_enabled() -> bool:
+    """Un reset debloque-t-il un compte verrouille ? (`!isFALSE(opt)` du source, defaut True)."""
+    return get_option("reset_password_unlock") is not False

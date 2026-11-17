@@ -1,4 +1,4 @@
-"""Phase 8 — tests unitaires du module i18n (comportement, sans dependance R)."""
+"""Tests unitaires du module i18n (comportement, sans dependance R)."""
 
 import copy
 
@@ -76,7 +76,7 @@ def test_get_dateinput_identity_for_all_languages():
 
 
 def test_get_dt_present_for_all_languages_including_fixed_zhcn():
-    # ECART ASSUME (decision Jeremy, gate module 1) : le source ne fournissait pas de traduction
+    # Ecart volontaire avec le package R : le source ne fournissait pas de traduction
     # DataTables pour zh-CN (cle stockee "cn", jamais atteinte). On la restaure. Les 12 langues
     # ont donc desormais une traduction DT.
     for code in REGISTERED_CODES:

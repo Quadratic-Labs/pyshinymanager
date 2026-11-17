@@ -1,13 +1,13 @@
 """Internationalisation : dictionnaires de labels et selection de langue (source R/language.R).
 
-Module 1 du plan. Fidelite PORTAGE_1_1 (donnees quasi-statiques). Les dictionnaires sont extraits
-du package R source (1.1.1.1) via `tools/oracle/export_i18n.R` et embarques dans
+Port fidele (donnees quasi-statiques). Les dictionnaires sont extraits
+du package R source via `tools/oracle/export_i18n.R` et embarques dans
 `_data/labels.json`, garantissant une parite exacte. Les quirks du source sont REPRODUITS et non
-corriges (decision gate G1/G2 "comportement source fait foi") :
-  - les jeux de cles divergents entre langues sont conserves tels quels (ZF-2) ;
-  - set_labels mute un etat global de processus (ZF-3), comme le pkgEnv de R.
+corriges ("comportement source fait foi") :
+  - les jeux de cles divergents entre langues sont conserves tels quels ;
+  - set_labels mute un etat global de processus, comme le pkgEnv de R.
 
-ECART ASSUME (decision gate module 1) : le source ne fournissait pas de traduction DataTables
+Ecart volontaire avec le package R : le source ne fournissait pas de traduction DataTables
 pour "zh-CN" (cle stockee sous "cn", jamais atteinte). On la restaure ici (voir export_i18n.R) :
 get_DT("zh-CN") renvoie desormais la traduction chinoise au lieu de None.
 """
@@ -22,7 +22,7 @@ _DATA = json.loads(files("shinymanager").joinpath("_data/labels.json").read_text
 
 #: Codes de langue supportes, dans l'ordre du source.
 _CODES: list[str] = _DATA["codes"]
-#: Labels par langue. Etat global mutable de processus (reproduit pkgEnv, cf. ZF-3).
+#: Labels par langue. Etat global mutable de processus (reproduit pkgEnv).
 _LABELS: dict[str, dict[str, str]] = _DATA["labels"]
 #: Labels DataTables par langue (12 langues ; zh-CN restaure, cf. ecart assume ci-dessus).
 _DT: dict[str, dict[str, str]] = _DATA["dt"]

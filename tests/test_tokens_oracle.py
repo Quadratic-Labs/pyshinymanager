@@ -1,4 +1,4 @@
-"""Phase 7 — validation differentielle du store de tokens contre le package R source.
+"""Validation differentielle du store de tokens contre le package R source.
 
 Rejoue cote Python les memes sequences deterministes que `tools/oracle/oracle_tokens.R` et
 compare les sorties observables (anti-rejeu, is_admin/coercition, get, remove).
@@ -52,13 +52,12 @@ def test_token_sequences_match_r(require_r, tmp_path):
     # S5 : is_valid sur inconnu
     assert tok.is_valid("jamais-vu") == r["s5_unknown"]
 
-    # S6 : remove. is_valid_server concorde avec R (False des deux cotes). En revanche get_user
-    # est une DEVIATION ASSUMEE (DT1) : le source fuit et renvoie encore "alice", Python purge
-    # et renvoie None. On verifie donc explicitement la deviation, sans exiger l'egalite avec R.
+    # S6 : remove. Le package R purge aussi l'identite : get_user renvoie NULL des deux
+    # cotes (NULL est omis du JSON R). Une ancienne version du source fuyait encore "alice".
     tok.remove("t1")
     assert tok.is_valid_server("t1") == r["s6_valid_server_after_remove"]
-    assert r["s6_get_user_after_remove"] == "alice"  # comportement source (fuite)
-    assert tok.get_user("t1") is None  # comportement Python corrige (ecart assume DT1)
+    assert r.get("s6_get_user_after_remove") is None
+    assert tok.get_user("t1") is None
 
     # S7 : timeout <= 0 -> toujours valide
     tok.set_timeout(0)

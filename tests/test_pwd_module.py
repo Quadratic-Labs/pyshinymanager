@@ -1,4 +1,4 @@
-"""Phase 8 — tests du module de changement de mot de passe (approche DU1)."""
+"""Tests du module de changement de mot de passe."""
 
 import pytest
 

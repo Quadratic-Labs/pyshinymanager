@@ -1,4 +1,4 @@
-"""Phase 8 — tests du module de login (approche DU1 : logique + structure, sans navigateur)."""
+"""Tests du module de login (logique + structure, sans navigateur)."""
 
 import pytest
 
@@ -109,6 +109,21 @@ def test_process_login_locked_blocks_even_with_good_pwd(sqlite_check):
     assert outcome.authenticated is False
     assert outcome.message_key == "Your account is locked"
     assert token is None
+
+
+def test_attempt_reaching_the_limit_locks_right_away(sqlite_check):
+    # Comme en R : la tentative qui atteint la limite verrouille tout de suite ("Account locked"),
+    # et un compte verrouille affiche "verrouille" meme avec un mauvais mot de passe.
+    check, path = sqlite_check
+    settings.set_option("pwd_failure_limit", 2)
+    outcome, _, _ = process_login("alice", "bad", check)
+    assert outcome.message_key == "Username or password are incorrect"
+    outcome, _, _ = process_login("alice", "bad", check)
+    assert outcome.message_key == "Your account is locked"
+    outcome, _, _ = process_login("alice", "bad", check)
+    assert outcome.message_key == "Your account is locked"
+    statuses = [r["status"] for r in read_db(path, "logs")]
+    assert statuses == ["Wrong pwd", "Wrong pwd", "Account locked", "Wrong pwd"]
 
 
 # --- Structure de l'UI (sans navigateur) ---

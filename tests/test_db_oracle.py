@@ -1,9 +1,10 @@
-"""Phase 7 — validation CONTRAT du module db contre le package R source.
+"""Validation CONTRAT du module db contre le package R source.
 
-Le stockage physique differe volontairement (R = blob chiffre, Python = SQLite en clair, D4/D7),
-donc on ne compare pas les octets mais le CONTENU LOGIQUE : schema, ordre des colonnes,
-initialisation de pwd_mngt/logs, mots de passe haches verifiables. R (create_db sans passphrase)
-fait office de reference.
+Les mots de passe sont haches avec un sel aleatoire, donc on ne compare pas les octets mais le
+CONTENU LOGIQUE : schema, ordre des colonnes, initialisation de pwd_mngt/logs, mots de passe
+haches verifiables. R (create_db sans passphrase) fait office de reference. La compatibilite
+physique des bases (lecture croisee R / Python, chiffree ou non) est testee dans
+test_db_compat_oracle.py.
 """
 
 import json

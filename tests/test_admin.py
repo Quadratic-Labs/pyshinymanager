@@ -1,12 +1,14 @@
-"""Phase 8 — tests du panneau d'administration (contrat, integration backend, sans navigateur).
+"""Tests du panneau d'administration (contrat, integration backend, sans navigateur).
 
 Deux niveaux :
   - les OPERATIONS (add / edit / delete / reset / force-change + listes) sont testees en
     integration contre un backend reel, sur les deux backends ;
   - la SURFACE (ids d'input, libelles i18n, modele d'interaction, gardes) est verifiee contre
-    docs/migration/comprehension/surface/admin-panel.md, l'admin ayant ete reconstruit fidelement.
-Le cablage reactif reste hors couverture (approche DU1).
+    le source, l'admin ayant ete reconstruit fidelement.
+Le cablage reactif reste hors couverture.
 """
+
+from pathlib import Path
 
 import pytest
 from shiny.module import ResolvedId
@@ -241,7 +243,7 @@ def test_row_button_escapes_the_username(sqlite_backend):
     assert '\\"; alert(1)//' in table.replace("&quot;", '"')
 
 
-# --- Surface : modale add / edit / edit multiple (cf. surface §3) ---
+# --- Surface : modale add / edit / edit multiple ---
 
 
 def _modal_ids(inputs):
@@ -312,7 +314,7 @@ def test_edit_modal_falls_back_to_text_input_on_broken_custom_input(sqlite_backe
     assert 'type="text"' in inputs[0].get_html_string()
 
 
-# --- Surface : modales de confirmation (cf. surface §4) ---
+# --- Surface : modales de confirmation ---
 
 
 def test_remove_modal_labels_and_button():
@@ -332,8 +334,28 @@ def test_change_and_reset_pwd_modals_labels():
     assert lan.get("Reset password") in rst
 
 
-def test_untranslated_source_keys_fall_back_to_raw_text():
-    # Quirk du source a reproduire : ces cles sont absentes du dictionnaire.
+def test_admin_labels_use_translated_keys():
+    # Comme en R : les cles du code sont alignees sur le dictionnaire (elles etaient non traduites).
+    src = Path(admin.__file__).read_text(encoding="utf-8")
+    assert "Maximum number of users : %s" not in src
+    assert "Fail to update user" not in src
     lan = use_language("fr")
-    assert lan.get("Maximum number of users : %s") == "Maximum number of users : %s"
-    assert lan.get("Fail to update user") == "Fail to update user"
+    assert lan.get("Maximum number of users: %s") != "Maximum number of users: %s"
+    assert lan.get("Failed to update user") != "Failed to update user"
+
+
+def test_list_pwds_shows_locked_column_only_with_a_limit(tmp_path):
+    path = str(tmp_path / "c.sqlite")
+    users = [{"user": "alice", "password": "Secret1"}, {"user": "bob", "password": "Pass1"}]
+    create_db(users, path)
+    _tok.set_sqlite_path(path)
+    pwd = read_db(path, "pwd_mngt")
+    pwd[0]["n_wrong_pwd"] = 3
+    from shinymanager.db import write_db
+
+    write_db(path, pwd, "pwd_mngt")
+    assert all("Locked" not in r for r in admin.list_pwds())
+    settings.set_option("pwd_failure_limit", 3)
+    assert [r["Locked"] for r in admin.list_pwds()] == ["TRUE", "FALSE"]
+    html = admin.pwds_table_html(admin.list_pwds()).get_html_string()
+    assert ">Yes<" in html and ">No<" in html
